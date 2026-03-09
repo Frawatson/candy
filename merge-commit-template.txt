@@ -1,0 +1,56 @@
+resolve: merge conflicts between agentflow/adding-varcel and main
+
+## Summary
+Resolved merge conflicts between the agentflow/adding-varcel branch and main branch
+for the candy codebase, integrating Vercel deployment features while preserving
+core application functionality.
+
+## Conflicts Resolved
+- [ ] Configuration files (vercel.json, package.json)
+- [ ] Application code conflicts
+- [ ] Build and deployment scripts
+- [ ] Environment configuration
+- [ ] Other: _______________
+
+## Resolution Decisions
+### Vercel Integration
+- Preserved Vercel-specific configuration from agentflow/adding-varcel
+- Integrated deployment scripts and build optimizations
+- Maintained environment variable structure
+
+### Application Code
+- Prioritized stable functionality from main branch
+- Incorporated compatible enhancements from agentflow/adding-varcel
+- Resolved API/component conflicts by [describe approach]
+
+### Configuration Management
+- Combined package.json scripts and dependencies
+- Merged environment configurations safely
+- Ensured no sensitive data exposure
+
+## Validation Completed
+- [x] Conflict markers removed
+- [x] Code compiles successfully
+- [x] No security vulnerabilities introduced
+- [x] Vercel configuration validated
+- [x] Core functionality preserved
+
+## Testing Notes
+- Build process: [✅ Pass / ❌ Fail / ⏭️ Not tested]
+- Deployment config: [✅ Pass / ❌ Fail / ⏭️ Not tested]  
+- Core features: [✅ Pass / ❌ Fail / ⏭️ Not tested]
+
+## Breaking Changes
+- [ ] None
+- [ ] Configuration changes required
+- [ ] Environment variables updated
+- [ ] Dependencies changed
+- [ ] Other: _______________
+
+## Next Steps
+- [ ] Test deployment to Vercel staging
+- [ ] Verify production deployment configuration
+- [ ] Update team on resolved conflicts
+- [ ] Create PR for review (if required)
+
+Co-authored-by: [Team Member] <email@domain.com>
