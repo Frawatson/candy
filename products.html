@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Browse our complete collection of premium candies and confections">
+    <title>Products - Sweet Delights</title>
+    
+    <link rel="icon" type="image/x-icon" href="/favicon.ico">
+    <link rel="stylesheet" href="css/main.css">
+    <link rel="stylesheet" href="css/components.css">
+    <link rel="stylesheet" href="css/responsive.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+    <!-- Header -->
+    <header class="header">
+        <nav class="nav container">
+            <div class="nav__brand">
+                <a href="/" class="nav__logo">
+                    🍭 Sweet Delights
+                </a>
+            </div>
+            
+            <ul class="nav__menu" id="nav-menu">
+                <li class="nav__item">
+                    <a href="/" class="nav__link">Home</a>
+                </li>
+                <li class="nav__item">
+                    <a href="products.html" class="nav__link nav__link--active">Products</a>
+                </li>
+                <li class="nav__item">
+                    <a href="about.html" class="nav__link">About</a>
+                </li>
+                <li class="nav__item">
+                    <a href="contact.html" class="nav__link">Contact</a>
+                </li>
+            </ul>
+            
+            <div class="nav__actions">
+                <a href="cart.html" class="btn btn--ghost cart-btn">
+                    🛒 Cart (<span id="cart-count">0</span>)
+                </a>
+                <button class="nav__toggle" id="nav-toggle" aria-label="Toggle navigation">
+                    <span></span>
+                    <span></span>
+                    <span></span>
+                </button>
+            </div>
+        </nav>
+    </header>
+
+    <main>
+        <!-- Page Header -->
+        <section class="page-header">
+            <div class="container">
+                <h1 class="page-header__title">Our Products</h1>
+                <p class="page-header__description">
+                    Discover our complete collection of handcrafted candies and confections
+                </p>
+            </div>
+        </section>
+
+        <!-- Filters & Search -->
+        <section class="filters-section">
+            <div class="container">
+                <div class="filters">
+                    <div class="filters__search">
+                        <input 
+                            type="text" 
+                            id="search-input" 
+                            class="search-input" 
+                            placeholder="Search products..."
+                            aria-label="Search products"
+                        >
+                    </div>
+                    
+                    <div class="filters__categories">
+                        <button class="filter-btn filter-btn--active" data-category="all">
+                            All Products
+                        </button>
+                        <button class="filter-btn" data-category="chocolate">
+                            Chocolates
+                        </button>
+                        <button class="filter-btn" data-category="gummies">
+                            Gummies
+                        </button>
+                        <button class="filter-btn" data-category="hard-candy">
+                            Hard Candy
+                        </button>
+                        <button class="filter-btn" data-category="seasonal">
+                            Seasonal
+                        </button>
+                        <button class="filter-btn" data-category="gift-sets">
+                            Gift Sets
+                        </button>
+                    </div>
+                    
+                    <div class="filters__sort">
+                        <select id="sort-select" class="sort-select" aria-label="Sort products">
+                            <option value="name">Sort by Name</option>
+                            <option value="price-low">Price: Low to High</option>
+                            <option value="price-high">Price: High to Low</option>
+                            <option value="rating">Highest Rated</option>
+                        </select>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Products Grid -->
+        <section class="section">
+            <div class="container">
+                <div class="products-wrapper">
+                    <div class="products-grid" id="products-grid">
+                        <!-- Products will be loaded dynamically -->
+                    </div>
+                    
+                    <div class="products-loading" id="products-loading">
+                        <div class="loading-spinner"></div>
+                        <p>Loading delicious products...</p>
+                    </div>
+                    
+                    <div class="products-empty" id="products-empty" style="display: none;">
+                        <p>No products found matching your criteria.</p>
+                        <button class="btn btn--outline" onclick="clearFilters()">Clear Filters</button>
+                    </div>
+                </div>
+                
+                <div class="pagination" id="pagination">
+                    <!-- Pagination will be generated dynamically -->
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <!-- Footer -->
+    <footer class="footer">
+        <div class="container">
+            <div class="footer__content">
+                <div class="footer__section">
+                    <h3 class="footer__title">Sweet Delights</h3>
+                    <p class="footer__description">
+                        Bringing joy and sweetness to every moment with our handcrafted confections.
+                    </p>
+                </div>
+                
+                <div class="footer__section">
+                    <h4 class="footer__heading">Quick Links</h4>
+                    <ul class="footer__links">
+                        <li><a href="/">Home</a></li>
+                        <li><a href="products.html">Products</a></li>
+                        <li><a href="about.html">About</a></li>
+                        <li><a href="contact.html">Contact</a></li>
+                    </ul>
+                </div>
+                
+                <div class="footer__section">
+                    <h4 class="footer__heading">Categories</h4>
+                    <ul class="footer__links">
+                        <li><a href="products.html?category=chocolate">Chocolates</a></li>
+                        <li><a href="products.html?category=gummies">Gummies</a></li>
+                        <li><a href="products.html?category=hard-candy">Hard Candy</a></li>
+                        <li><a href="products.html?category=seasonal">Seasonal</a></li>
+                    </ul>
+                </div>
+                
+                <div class="footer__section">
+                    <h4 class="footer__heading">Contact Info</h4>
+                    <ul class="footer__contact">
+                        <li>📧 hello@sweetdelights.com</li>
+                        <li>📞 (555) 123-CANDY</li>
+                        <li>📍 123 Sweet Street, Candy City, CC 12345</li>
+                    </ul>
+                </div>
+            </div>
+            
+            <div class="footer__bottom">
+                <p>&copy; 2024 Sweet Delights. All rights reserved.</p>
+            </div>
+        </div>
+    </footer>
+
+    <!-- Product Modal -->
+    <div class="modal" id="product-modal" role="dialog" aria-labelledby="modal-title" aria-hidden="true">
+        <div class="modal__backdrop" onclick="closeModal()"></div>
+        <div class="modal__content">
+            <button class="modal__close" onclick="closeModal()" aria-label="Close modal">&times;</button>
+            <div class="modal__body" id="modal-body">
+                <!-- Product details will be loaded here -->
+            </div>
+        </div>
+    </div>
+
+    <script src="js/main.js"></script>
+    <script src="js/cart.js"></script>
+    <script src="js/products.js"></script>
+</body>
+</html>
