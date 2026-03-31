@@ -220,4 +220,11 @@ class DatabaseConnectionMock extends EventEmitter {
     };
   }
 
-  extractEmailLogData(params) {
+    this.removeAllListeners();
+  reset() {
+    this.queryHistory = [];
+    this.shouldFail = false;
+    this.failureType = 'connection';
+    this.queryDelay = 0;
+    this.removeAllListeners();
+  }
