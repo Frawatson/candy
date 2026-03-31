@@ -22,7 +22,8 @@ jest.mock('../../src/utils/logger', () => ({
 }));
 
 // Set test environment variables
-process.env.NODE_ENV = 'test';
+process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret-do-not-use-in-production-this-is-only-for-testing-purposes-abcdefghijklmnop';
+process.env.JWT_REFRESH_SECRET = process.env.JWT_REFRESH_SECRET || 'test-jwt-refresh-secret-do-not-use-in-production-this-is-only-for-testing-purposes-abcd';
 process.env.JWT_SECRET = process.env.JWT_SECRET || crypto.randomBytes(64).toString('hex');
 process.env.JWT_REFRESH_SECRET = process.env.JWT_REFRESH_SECRET || crypto.randomBytes(64).toString('hex');
 process.env.JWT_EXPIRY = '15m';
