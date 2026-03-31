@@ -2,44 +2,28 @@ const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
-require('dotenv').config();
+const swaggerUi = require('swagger-ui-express');
+const { specs, swaggerUiOptions } = require('../docs/swagger');
 
+const { errorHandler } = require('./middleware/errorHandler');
 const { logger } = require('./utils/logger');
-const { 
-  errorHandler, 
-  notFoundHandler, 
-  unhandledRejectionHandler, 
-  uncaughtExceptionHandler,
-  healthCheckHandler 
-} = require('./middleware/errorHandler');
 
-// Create Express app
+// Import routes
+const authRoutes = require('./routes/auth');
+const refreshRoutes = require('./routes/auth/refresh');
+const userRoutes = require('./routes/users');
+
 const app = express();
-const PORT = process.env.PORT || 3000;
-
-// Global error handlers
-process.on('unhandledRejection', unhandledRejectionHandler);
-process.on('uncaughtException', uncaughtExceptionHandler);
-
-// Request correlation ID and logging middleware
-app.use((req, res, next) => {
-  logger.logRequest(req, res, next);
-});
 
 // Security middleware
 app.use(helmet({
   contentSecurityPolicy: {
     directives: {
       defaultSrc: ["'self'"],
-      scriptSrc: ["'self'"],
       styleSrc: ["'self'", "'unsafe-inline'"],
+      scriptSrc: ["'self'"],
       imgSrc: ["'self'", "data:", "https:"],
     },
-  },
-  hsts: {
-    maxAge: 31536000,
-    includeSubDomains: true,
-    preload: true
   }
 }));
 
@@ -47,152 +31,112 @@ app.use(helmet({
 app.use(cors({
   origin: process.env.CORS_ORIGIN || 'http://localhost:3000',
   credentials: true,
-  optionsSuccessStatus: 200
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
 }));
 
 // Rate limiting
 const limiter = rateLimit({
   windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS) || 15 * 60 * 1000, // 15 minutes
-  max: parseInt(process.env.RATE_LIMIT_MAX_ATTEMPTS) || 100,
+  max: parseInt(process.env.RATE_LIMIT_MAX_ATTEMPTS) || 100, // limit each IP to 100 requests per windowMs
   message: {
     success: false,
-    error: {
-      message: 'Too many requests from this IP, please try again later',
-      code: 'RATE_LIMIT_EXCEEDED'
-    }
+    error: 'Too many requests from this IP, please try again later',
+    code: 'RATE_LIMIT_EXCEEDED'
   },
   standardHeaders: true,
-  legacyHeaders: false,
-  handler: (req, res) => {
-    logger.warn('Rate limit exceeded', {
-      correlationId: req.correlationId,
-      ip: req.ip,
-      userAgent: req.get('User-Agent'),
-      url: req.url
-    });
-    
-    res.status(429).json({
-      success: false,
-      error: {
-        message: 'Too many requests from this IP, please try again later',
-        code: 'RATE_LIMIT_EXCEEDED',
-        correlationId: req.correlationId,
-        retryAfter: Math.round(limiter.windowMs / 1000)
-      }
-    });
-  }
+  legacyHeaders: false
 });
 
 app.use(limiter);
 
 // Body parsing middleware
-app.use(express.json({ 
-  limit: '10mb',
-  strict: true
-}));
-app.use(express.urlencoded({ 
-  extended: true, 
-  limit: '10mb' 
-}));
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+
+// Request correlation ID middleware
+app.use((req, res, next) => {
+  req.correlationId = req.headers['x-correlation-id'] || 
+    `req-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
+  res.setHeader('X-Correlation-ID', req.correlationId);
+  next();
+});
+
+// Request logging middleware
+app.use((req, res, next) => {
+  logger.info('Incoming request', {
+    correlationId: req.correlationId,
+    method: req.method,
+    url: req.url,
+    ip: req.ip,
+    userAgent: req.get('User-Agent')
+  });
+  next();
+});
+
+// API Documentation routes
+app.use('/api-docs', swaggerUi.serve);
+app.get('/api-docs', swaggerUi.setup(specs, swaggerUiOptions));
+
+// Serve OpenAPI spec as JSON
+app.get('/api-docs.json', (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  res.send(specs);
+});
 
 // Health check endpoint
-app.get('/health', healthCheckHandler);
-
-// API routes
-app.get('/', (req, res) => {
+app.get('/health', (req, res) => {
   res.json({
     success: true,
-    message: 'Authentication System API',
-    version: process.env.npm_package_version || '1.0.0',
-    environment: process.env.NODE_ENV || 'development',
-    timestamp: new Date().toISOString()
+    message: 'Auth API is running',
+    timestamp: new Date().toISOString(),
+    version: '1.0.0'
   });
 });
 
-// Example auth routes (these would be imported from actual route files)
-app.use('/api/auth', (req, res, next) => {
-  // Placeholder for auth routes
-  res.status(501).json({
+// API routes
+app.use('/api/auth', authRoutes);
+app.use('/api/auth', refreshRoutes);
+app.use('/api/users', userRoutes);
+
+// 404 handler
+app.use('*', (req, res) => {
+  logger.warn('Route not found', {
+    correlationId: req.correlationId,
+    method: req.method,
+    url: req.url
+  });
+  
+  res.status(404).json({
     success: false,
-    error: {
-      message: 'Auth routes not yet implemented',
-      code: 'NOT_IMPLEMENTED',
-      correlationId: req.correlationId
-    }
+    error: 'Route not found',
+    code: 'NOT_FOUND',
+    correlationId: req.correlationId
   });
 });
 
-app.use('/api/users', (req, res, next) => {
-  // Placeholder for user routes
-  res.status(501).json({
-    success: false,
-    error: {
-      message: 'User routes not yet implemented',
-      code: 'NOT_IMPLEMENTED',
-      correlationId: req.correlationId
-    }
-  });
-});
-
-// 404 handler - must be after all routes
-app.use(notFoundHandler);
-
-// Error handling middleware - must be last
+// Global error handler
 app.use(errorHandler);
 
-// Graceful shutdown handler
-const gracefulShutdown = (signal) => {
-  logger.info(`${signal} received, starting graceful shutdown`);
-  
-  const server = app.listen(PORT);
-  
-  server.close(() => {
-    logger.info('HTTP server closed');
-    
-    // Close database connections, cleanup resources, etc.
-    process.exit(0);
-  });
-  
-  // Force close after 30 seconds
-  setTimeout(() => {
-    logger.error('Forced shutdown after timeout');
-    process.exit(1);
-  }, 30000);
-};
-
-process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
-process.on('SIGINT', () => gracefulShutdown('SIGINT'));
-
-// Start server
-const server = app.listen(PORT, () => {
-  logger.info('Server started', {
-    port: PORT,
-    environment: process.env.NODE_ENV || 'development',
-    nodeVersion: process.version,
-    pid: process.pid
-  });
+// Graceful shutdown
+process.on('SIGTERM', () => {
+  logger.info('SIGTERM received, shutting down gracefully');
+  process.exit(0);
 });
 
-// Handle server errors
-server.on('error', (error) => {
-  if (error.syscall !== 'listen') {
-    throw error;
-  }
-
-  const bind = typeof PORT === 'string' ? 'Pipe ' + PORT : 'Port ' + PORT;
-
-  switch (error.code) {
-    case 'EACCES':
-      logger.error(`${bind} requires elevated privileges`);
-      process.exit(1);
-      break;
-    case 'EADDRINUSE':
-      logger.error(`${bind} is already in use`);
-      process.exit(1);
-      break;
-    default:
-      throw error;
-  }
+process.on('SIGINT', () => {
+  logger.info('SIGINT received, shutting down gracefully');
+  process.exit(0);
 });
+
+const PORT = process.env.PORT || 3000;
+
+if (require.main === module) {
+  app.listen(PORT, () => {
+    logger.info(`Auth API server running on port ${PORT}`);
+    logger.info(`API Documentation available at http://localhost:${PORT}/api-docs`);
+    logger.info(`OpenAPI spec available at http://localhost:${PORT}/api-docs.json`);
+  });
+}
 
 module.exports = app;
