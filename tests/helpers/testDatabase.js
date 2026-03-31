@@ -140,7 +140,11 @@ class TestDatabase {
       token,
       expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(), // 24 hours
       used: false,
-      createdAt: new Date().toISOString(),
+        const tokenMeta = {
+          ...token,
+        };
+        delete tokenMeta.token;
+        tokens.push({
     };
     
     this.emailVerificationTokens.set(token, tokenData);
