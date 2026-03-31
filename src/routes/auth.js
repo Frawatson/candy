@@ -29,8 +29,47 @@ const generateMockJwtToken = (type = 'access') => {
 };
 
 /**
- * POST /api/auth/register
- * Register a new user
+ * @swagger
+ * /api/auth/register:
+ *   post:
+ *     tags: [Authentication]
+ *     summary: Register a new user account
+ *     description: Create a new user account with email and password. An email verification will be sent to the provided email address.
+ *     operationId: registerUser
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             $ref: '#/components/schemas/RegisterRequest'
+ *           examples:
+ *             registerUser:
+ *               $ref: '#/components/examples/RegisterRequestExample'
+ *     responses:
+ *       201:
+ *         description: User registered successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/RegisterResponse'
+ *             examples:
+ *               success:
+ *                 $ref: '#/components/examples/RegisterSuccessExample'
+ *       400:
+ *         $ref: '#/components/responses/BadRequest'
+ *       409:
+ *         description: User already exists with this email
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ *             examples:
+ *               conflict:
+ *                 $ref: '#/components/examples/RegisterConflictExample'
+ *       429:
+ *         $ref: '#/components/responses/TooManyRequests'
+ *       500:
+ *         $ref: '#/components/responses/InternalServerError'
  */
 router.post('/register', 
   validateBody(authSchemas.registerSchema),
@@ -77,8 +116,47 @@ router.post('/register',
 );
 
 /**
- * POST /api/auth/login
- * Authenticate user
+ * @swagger
+ * /api/auth/login:
+ *   post:
+ *     tags: [Authentication]
+ *     summary: Authenticate user and get tokens
+ *     description: Login with email and password to receive access and refresh tokens for API authentication.
+ *     operationId: loginUser
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             $ref: '#/components/schemas/LoginRequest'
+ *           examples:
+ *             loginUser:
+ *               $ref: '#/components/examples/LoginRequestExample'
+ *     responses:
+ *       200:
+ *         description: Login successful
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/LoginResponse'
+ *             examples:
+ *               success:
+ *                 $ref: '#/components/examples/LoginSuccessExample'
+ *       400:
+ *         $ref: '#/components/responses/BadRequest'
+ *       401:
+ *         description: Invalid email or password
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ *             examples:
+ *               invalidCredentials:
+ *                 $ref: '#/components/examples/LoginFailureExample'
+ *       429:
+ *         $ref: '#/components/responses/TooManyRequests'
+ *       500:
+ *         $ref: '#/components/responses/InternalServerError'
  */
 router.post('/login',
   validateBody(authSchemas.loginSchema),
@@ -131,8 +209,47 @@ router.post('/login',
 );
 
 /**
- * POST /api/auth/forgot-password
- * Request password reset
+ * @swagger
+ * /api/auth/forgot-password:
+ *   post:
+ *     tags: [Authentication]
+ *     summary: Request password reset
+ *     description: Send password reset instructions to the specified email address. A reset token will be emailed if the account exists.
+ *     operationId: forgotPassword
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             $ref: '#/components/schemas/ForgotPasswordRequest'
+ *           examples:
+ *             forgotPassword:
+ *               $ref: '#/components/examples/ForgotPasswordRequestExample'
+ *     responses:
+ *       200:
+ *         description: Password reset instructions sent
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ForgotPasswordResponse'
+ *             examples:
+ *               success:
+ *                 $ref: '#/components/examples/ForgotPasswordSuccessExample'
+ *       400:
+ *         $ref: '#/components/responses/BadRequest'
+ *       404:
+ *         description: No user found with this email address
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ *             examples:
+ *               notFound:
+ *                 $ref: '#/components/examples/ForgotPasswordNotFoundExample'
+ *       429:
+ *         $ref: '#/components/responses/TooManyRequests'
+ *       500:
+ *         $ref: '#/components/responses/InternalServerError'
  */
 router.post('/forgot-password',
   validateBody(authSchemas.forgotPasswordSchema),
@@ -173,8 +290,47 @@ router.post('/forgot-password',
 );
 
 /**
- * POST /api/auth/reset-password
- * Reset password with token
+ * @swagger
+ * /api/auth/reset-password:
+ *   post:
+ *     tags: [Authentication]
+ *     summary: Reset password with token
+ *     description: Reset user password using the token received via email. The token expires after 1 hour.
+ *     operationId: resetPassword
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             $ref: '#/components/schemas/ResetPasswordRequest'
+ *           examples:
+ *             resetPassword:
+ *               $ref: '#/components/examples/ResetPasswordRequestExample'
+ *     responses:
+ *       200:
+ *         description: Password reset successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/ResetPasswordResponse'
+ *             examples:
+ *               success:
+ *                 $ref: '#/components/examples/ResetPasswordSuccessExample'
+ *       400:
+ *         $ref: '#/components/responses/BadRequest'
+ *       401:
+ *         description: Invalid or expired reset token
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ *             examples:
+ *               invalidToken:
+ *                 $ref: '#/components/examples/ResetPasswordInvalidTokenExample'
+ *       429:
+ *         $ref: '#/components/responses/TooManyRequests'
+ *       500:
+ *         $ref: '#/components/responses/InternalServerError'
  */
 router.post('/reset-password',
   validateBody(authSchemas.resetPasswordSchema),
@@ -207,8 +363,47 @@ router.post('/reset-password',
 );
 
 /**
- * POST /api/auth/verify-email
- * Verify email address
+ * @swagger
+ * /api/auth/verify-email:
+ *   post:
+ *     tags: [Authentication]
+ *     summary: Verify email address
+ *     description: Verify user email address using the token received in the verification email.
+ *     operationId: verifyEmail
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             $ref: '#/components/schemas/VerifyEmailRequest'
+ *           examples:
+ *             verifyEmail:
+ *               $ref: '#/components/examples/VerifyEmailRequestExample'
+ *     responses:
+ *       200:
+ *         description: Email verified successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/VerifyEmailResponse'
+ *             examples:
+ *               success:
+ *                 $ref: '#/components/examples/VerifyEmailSuccessExample'
+ *       400:
+ *         $ref: '#/components/responses/BadRequest'
+ *       401:
+ *         description: Invalid or expired verification token
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ *             examples:
+ *               invalidToken:
+ *                 $ref: '#/components/examples/VerifyEmailInvalidTokenExample'
+ *       429:
+ *         $ref: '#/components/responses/TooManyRequests'
+ *       500:
+ *         $ref: '#/components/responses/InternalServerError'
  */
 router.post('/verify-email',
   validateBody(authSchemas.verifyEmailSchema),
@@ -241,8 +436,47 @@ router.post('/verify-email',
 );
 
 /**
- * POST /api/auth/refresh
- * Refresh access token
+ * @swagger
+ * /api/auth/refresh:
+ *   post:
+ *     tags: [Authentication]
+ *     summary: Refresh access token
+ *     description: Use a refresh token to obtain a new access token. The refresh token will be rotated for security.
+ *     operationId: refreshToken
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             $ref: '#/components/schemas/RefreshTokenRequest'
+ *           examples:
+ *             refreshToken:
+ *               $ref: '#/components/examples/RefreshTokenRequestExample'
+ *     responses:
+ *       200:
+ *         description: Token refreshed successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/RefreshTokenResponse'
+ *             examples:
+ *               success:
+ *                 $ref: '#/components/examples/RefreshTokenSuccessExample'
+ *       400:
+ *         $ref: '#/components/responses/BadRequest'
+ *       401:
+ *         description: Invalid refresh token
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ *             examples:
+ *               invalidToken:
+ *                 $ref: '#/components/examples/RefreshTokenInvalidExample'
+ *       429:
+ *         $ref: '#/components/responses/TooManyRequests'
+ *       500:
+ *         $ref: '#/components/responses/InternalServerError'
  */
 router.post('/refresh',
   validateBody(authSchemas.refreshTokenSchema),
