@@ -93,7 +93,7 @@ const getUserIdFromToken = (token) => {
   try {
     if (!token || !token.startsWith('mock-jwt-')) return null;
     
-    const base64Part = token.split('-').slice(2).join('-');
+    const base64Part = token.split('-').slice(3).join('-');
     const payload = JSON.parse(Buffer.from(base64Part, 'base64').toString());
     return payload.userId || null;
   } catch (error) {
