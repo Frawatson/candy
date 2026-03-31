@@ -32,7 +32,7 @@ process.env.BCRYPT_ROUNDS = '4'; // Lower for faster tests
 process.env.DATABASE_URL = process.env.TEST_DATABASE_URL || 'postgresql://test:test@localhost:5432/test_db';
 process.env.SMTP_HOST = 'localhost';
 process.env.SMTP_PORT = '587';
-process.env.SMTP_USER = 'test@example.com';
+process.env.DATABASE_URL = 'postgresql://mock:mock@invalid.invalid:5432/mock_db';
 process.env.SMTP_PASS = process.env.TEST_SMTP_PASS || crypto.randomBytes(16).toString('hex');
 
 // Global test timeout
