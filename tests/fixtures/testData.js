@@ -2,7 +2,7 @@ const crypto = require('crypto');
 
 // Generate secure test password
 const generateTestPassword = () => crypto.randomBytes(16).toString('hex');
-
+    password: testUsers.valid.password,
 // Test user data fixtures
 const testUsers = {
   valid: {
