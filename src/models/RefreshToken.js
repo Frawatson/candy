@@ -1,15 +1,14 @@
-const { Pool } = require('pg');
+const databaseConnection = require('../database/connection');
 const { hashToken, calculateExpiryDate } = require('../utils/tokenUtils');
 const { jwtConfig } = require('../config/jwt');
+const logger = require('../utils/logger');
 
 class RefreshToken {
-  constructor(pool) {
-    this.pool = pool;
+  constructor() {
+    this.db = databaseConnection;
   }
 
   async create({ userId, tokenHash, tokenFamily, expiresAt, deviceInfo = null, ipAddress = null }) {
-    const client = await this.pool.connect();
-    
     try {
       const query = `
         INSERT INTO refresh_tokens (
@@ -28,16 +27,26 @@ class RefreshToken {
         tokenFamily
       ];
 
-      const result = await client.query(query, values);
+      const result = await this.db.query(query, values);
+      
+      logger.debug('Refresh token created', {
+        tokenId: result.rows[0].id,
+        userId,
+        tokenFamily
+      });
+
       return result.rows[0];
-    } finally {
-      client.release();
+    } catch (error) {
+      logger.error('Failed to create refresh token', {
+        error: error.message,
+        userId,
+        tokenFamily
+      });
+      throw error;
     }
   }
 
   async findByTokenHash(tokenHash) {
-    const client = await this.pool.connect();
-    
     try {
       const query = `
         SELECT id, user_id, token_hash, expires_at, is_blacklisted,
@@ -46,16 +55,18 @@ class RefreshToken {
         WHERE token_hash = $1
       `;
       
-      const result = await client.query(query, [tokenHash]);
+      const result = await this.db.query(query, [tokenHash]);
       return result.rows[0] || null;
-    } finally {
-      client.release();
+    } catch (error) {
+      logger.error('Failed to find refresh token by hash', {
+        error: error.message,
+        hasTokenHash: !!tokenHash
+      });
+      throw error;
     }
   }
 
   async findByUserId(userId, limit = 10) {
-    const client = await this.pool.connect();
-    
     try {
       const query = `
         SELECT id, user_id, token_hash, expires_at, is_blacklisted,
@@ -66,16 +77,19 @@ class RefreshToken {
         LIMIT $2
       `;
       
-      const result = await client.query(query, [userId, limit]);
+      const result = await this.db.query(query, [userId, limit]);
       return result.rows;
-    } finally {
-      client.release();
+    } catch (error) {
+      logger.error('Failed to find refresh tokens by user ID', {
+        error: error.message,
+        userId,
+        limit
+      });
+      throw error;
     }
   }
 
   async findByTokenFamily(tokenFamily) {
-    const client = await this.pool.connect();
-    
     try {
       const query = `
         SELECT id, user_id, token_hash, expires_at, is_blacklisted,
@@ -85,16 +99,18 @@ class RefreshToken {
         ORDER BY created_at DESC
       `;
       
-      const result = await client.query(query, [tokenFamily]);
+      const result = await this.db.query(query, [tokenFamily]);
       return result.rows;
-    } finally {
-      client.release();
+    } catch (error) {
+      logger.error('Failed to find refresh tokens by token family', {
+        error: error.message,
+        tokenFamily
+      });
+      throw error;
     }
   }
 
   async updateLastUsed(tokenHash, ipAddress = null) {
-    const client = await this.pool.connect();
-    
     try {
       const query = `
         UPDATE refresh_tokens 
@@ -106,16 +122,28 @@ class RefreshToken {
                   created_at, updated_at, last_used_at, device_info, ip_address, token_family
       `;
       
-      const result = await client.query(query, [tokenHash, ipAddress]);
+      const result = await this.db.query(query, [tokenHash, ipAddress]);
+      
+      if (result.rows[0]) {
+        logger.debug('Refresh token last used updated', {
+          tokenId: result.rows[0].id,
+          userId: result.rows[0].user_id,
+          ipAddress
+        });
+      }
+
       return result.rows[0] || null;
-    } finally {
-      client.release();
+    } catch (error) {
+      logger.error('Failed to update refresh token last used', {
+        error: error.message,
+        hasTokenHash: !!tokenHash,
+        ipAddress
+      });
+      throw error;
     }
   }
 
   async blacklist(tokenHash) {
-    const client = await this.pool.connect();
-    
     try {
       const query = `
         UPDATE refresh_tokens 
@@ -124,16 +152,26 @@ class RefreshToken {
         RETURNING id, user_id, is_blacklisted
       `;
       
-      const result = await client.query(query, [tokenHash]);
+      const result = await this.db.query(query, [tokenHash]);
+      
+      if (result.rows[0]) {
+        logger.info('Refresh token blacklisted', {
+          tokenId: result.rows[0].id,
+          userId: result.rows[0].user_id
+        });
+      }
+
       return result.rows[0] || null;
-    } finally {
-      client.release();
+    } catch (error) {
+      logger.error('Failed to blacklist refresh token', {
+        error: error.message,
+        hasTokenHash: !!tokenHash
+      });
+      throw error;
     }
   }
 
   async blacklistByUserId(userId) {
-    const client = await this.pool.connect();
-    
     try {
       const query = `
         UPDATE refresh_tokens 
@@ -141,16 +179,24 @@ class RefreshToken {
         WHERE user_id = $1 AND is_blacklisted = false
       `;
       
-      const result = await client.query(query, [userId]);
+      const result = await this.db.query(query, [userId]);
+      
+      logger.info('Refresh tokens blacklisted by user ID', {
+        userId,
+        tokensBlacklisted: result.rowCount
+      });
+
       return result.rowCount;
-    } finally {
-      client.release();
+    } catch (error) {
+      logger.error('Failed to blacklist refresh tokens by user ID', {
+        error: error.message,
+        userId
+      });
+      throw error;
     }
   }
 
   async blacklistTokenFamily(tokenFamily) {
-    const client = await this.pool.connect();
-    
     try {
       const query = `
         UPDATE refresh_tokens 
@@ -158,32 +204,48 @@ class RefreshToken {
         WHERE token_family = $1 AND is_blacklisted = false
       `;
       
-      const result = await client.query(query, [tokenFamily]);
+      const result = await this.db.query(query, [tokenFamily]);
+      
+      logger.info('Refresh token family blacklisted', {
+        tokenFamily,
+        tokensBlacklisted: result.rowCount
+      });
+
       return result.rowCount;
-    } finally {
-      client.release();
+    } catch (error) {
+      logger.error('Failed to blacklist refresh token family', {
+        error: error.message,
+        tokenFamily
+      });
+      throw error;
     }
   }
 
   async deleteExpired() {
-    const client = await this.pool.connect();
-    
     try {
       const query = `
         DELETE FROM refresh_tokens 
         WHERE expires_at < NOW()
       `;
       
-      const result = await client.query(query);
+      const result = await this.db.query(query);
+      
+      if (result.rowCount > 0) {
+        logger.info('Expired refresh tokens deleted', {
+          tokensDeleted: result.rowCount
+        });
+      }
+
       return result.rowCount;
-    } finally {
-      client.release();
+    } catch (error) {
+      logger.error('Failed to delete expired refresh tokens', {
+        error: error.message
+      });
+      throw error;
     }
   }
 
   async deleteBlacklisted(olderThanDays = 30) {
-    const client = await this.pool.connect();
-    
     try {
       const query = `
         DELETE FROM refresh_tokens 
@@ -191,32 +253,50 @@ class RefreshToken {
         AND updated_at < NOW() - INTERVAL '${olderThanDays} days'
       `;
       
-      const result = await client.query(query);
+      const result = await this.db.query(query);
+      
+      if (result.rowCount > 0) {
+        logger.info('Old blacklisted refresh tokens deleted', {
+          tokensDeleted: result.rowCount,
+          olderThanDays
+        });
+      }
+
       return result.rowCount;
-    } finally {
-      client.release();
+    } catch (error) {
+      logger.error('Failed to delete blacklisted refresh tokens', {
+        error: error.message,
+        olderThanDays
+      });
+      throw error;
     }
   }
 
   async deleteByUserId(userId) {
-    const client = await this.pool.connect();
-    
     try {
       const query = `
         DELETE FROM refresh_tokens 
         WHERE user_id = $1
       `;
       
-      const result = await client.query(query, [userId]);
+      const result = await this.db.query(query, [userId]);
+      
+      logger.info('Refresh tokens deleted by user ID', {
+        userId,
+        tokensDeleted: result.rowCount
+      });
+
       return result.rowCount;
-    } finally {
-      client.release();
+    } catch (error) {
+      logger.error('Failed to delete refresh tokens by user ID', {
+        error: error.message,
+        userId
+      });
+      throw error;
     }
   }
 
   async getStats() {
-    const client = await this.pool.connect();
-    
     try {
       const query = `
         SELECT 
@@ -227,29 +307,40 @@ class RefreshToken {
         FROM refresh_tokens
       `;
       
-      const result = await client.query(query);
+      const result = await this.db.query(query);
       return result.rows[0];
-    } finally {
-      client.release();
+    } catch (error) {
+      logger.error('Failed to get refresh token stats', {
+        error: error.message
+      });
+      throw error;
     }
   }
 
   async isValid(tokenHash) {
-    const token = await this.findByTokenHash(tokenHash);
-    
-    if (!token) {
-      return { valid: false, reason: 'Token not found' };
+    try {
+      const token = await this.findByTokenHash(tokenHash);
+      
+      if (!token) {
+        return { valid: false, reason: 'Token not found' };
+      }
+      
+      if (token.is_blacklisted) {
+        return { valid: false, reason: 'Token is blacklisted' };
+      }
+      
+      if (new Date(token.expires_at) < new Date()) {
+        return { valid: false, reason: 'Token expired' };
+      }
+      
+      return { valid: true, token };
+    } catch (error) {
+      logger.error('Failed to validate refresh token', {
+        error: error.message,
+        hasTokenHash: !!tokenHash
+      });
+      throw error;
     }
-    
-    if (token.is_blacklisted) {
-      return { valid: false, reason: 'Token is blacklisted' };
-    }
-    
-    if (new Date(token.expires_at) < new Date()) {
-      return { valid: false, reason: 'Token expired' };
-    }
-    
-    return { valid: true, token };
   }
 }
 

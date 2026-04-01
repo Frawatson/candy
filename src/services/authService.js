@@ -1,309 +1,389 @@
-const bcrypt = require('bcryptjs');
+const bcrypt = require('bcrypt');
+const jwt = require('jsonwebtoken');
 const { Pool } = require('pg');
-const { generateAccessToken } = require('../config/jwt');
-const refreshTokenService = require('./refreshTokenService');
-const { getClientIP, sanitizeDeviceInfo } = require('../utils/tokenUtils');
+const databaseConnection = require('../database/connection');
+const { jwtConfig } = require('../config/jwt');
+const RefreshToken = require('../models/RefreshToken');
+const { hashToken, generateTokenFamily } = require('../utils/tokenUtils');
+const logger = require('../utils/logger');
 
 class AuthService {
   constructor() {
-    this.pool = new Pool({
-      connectionString: process.env.DATABASE_URL || undefined,
-      host: process.env.DATABASE_HOST,
-      port: process.env.DATABASE_PORT,
-      database: process.env.DATABASE_NAME,
-      user: process.env.DATABASE_USER,
-      password: process.env.DATABASE_PASSWORD,
-      ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
+    this.db = databaseConnection;
+    this.refreshTokenModel = new RefreshToken();
+  }
+
+  async register({ username, email, password, firstName, lastName }) {
+    return await this.db.transaction(async (client) => {
+      try {
+        // Check if user already exists
+        const existingUser = await client.query(
+          'SELECT id FROM users WHERE username = $1 OR email = $2',
+          [username, email]
+        );
+
+        if (existingUser.rows.length > 0) {
+          throw new Error('User already exists');
+        }
+
+        // Hash password
+        const saltRounds = parseInt(process.env.BCRYPT_ROUNDS) || 12;
+        const hashedPassword = await bcrypt.hash(password, saltRounds);
+
+        // Create user
+        const userResult = await client.query(
+          `INSERT INTO users (username, email, password_hash, first_name, last_name, created_at, updated_at)
+           VALUES ($1, $2, $3, $4, $5, NOW(), NOW())
+           RETURNING id, username, email, first_name, last_name, is_verified, created_at`,
+          [username, email, hashedPassword, firstName, lastName]
+        );
+
+        const user = userResult.rows[0];
+
+        logger.info('User registered successfully', {
+          userId: user.id,
+          username: user.username,
+          email: user.email
+        });
+
+        return {
+          user: {
+            id: user.id,
+            username: user.username,
+            email: user.email,
+            firstName: user.first_name,
+            lastName: user.last_name,
+            isVerified: user.is_verified,
+            createdAt: user.created_at
+          }
+        };
+      } catch (error) {
+        logger.error('User registration failed', {
+          error: error.message,
+          username,
+          email
+        });
+        throw error;
+      }
     });
   }
 
-  async login(email, password, req = null) {
-    const client = await this.pool.connect();
-    
+  async login({ username, password, deviceInfo, ipAddress }) {
     try {
-      // Find user by email
-      const userQuery = `
-        SELECT id, email, password, role, is_verified, is_active, 
-               first_name, last_name, created_at, updated_at
-        FROM users 
-        WHERE email = $1 AND is_active = true
-      `;
-      
-      const userResult = await client.query(userQuery, [email]);
+      // Find user by username or email
+      const userResult = await this.db.query(
+        `SELECT id, username, email, password_hash, first_name, last_name, 
+                is_verified, is_active, failed_login_attempts, locked_until
+         FROM users 
+         WHERE (username = $1 OR email = $1) AND is_active = true`,
+        [username]
+      );
+
+      if (userResult.rows.length === 0) {
+        throw new Error('Invalid credentials');
+      }
+
       const user = userResult.rows[0];
 
-      if (!user) {
-        throw new Error('Invalid email or password');
+      // Check if account is locked
+      if (user.locked_until && new Date(user.locked_until) > new Date()) {
+        throw new Error('Account is temporarily locked due to multiple failed login attempts');
       }
 
       // Verify password
-      const isValidPassword = await bcrypt.compare(password, user.password);
-      if (!isValidPassword) {
-        throw new Error('Invalid email or password');
-      }
-
-      // Check if email is verified
-      if (!user.is_verified) {
-        throw new Error('Email address is not verified');
-      }
-
-      // Extract client information if request object provided
-      let ipAddress = null;
-      let deviceInfo = {};
+      const isValidPassword = await bcrypt.compare(password, user.password_hash);
       
-      if (req) {
-        ipAddress = getClientIP(req);
-        deviceInfo = sanitizeDeviceInfo(req.headers['user-agent'], {
-          platform: req.headers['x-platform'],
-          browser: req.headers['x-browser'],
-          version: req.headers['x-version']
-        });
+      if (!isValidPassword) {
+        // Increment failed login attempts
+        await this.db.query(
+          `UPDATE users 
+           SET failed_login_attempts = failed_login_attempts + 1,
+               locked_until = CASE 
+                 WHEN failed_login_attempts >= 4 THEN NOW() + INTERVAL '15 minutes'
+                 ELSE NULL
+               END,
+               updated_at = NOW()
+           WHERE id = $1`,
+          [user.id]
+        );
+
+        throw new Error('Invalid credentials');
       }
 
-      // Generate token pair
-      const tokens = await refreshTokenService.generateTokenPair(
-        user,
-        deviceInfo,
-        ipAddress
-      );
-
-      // Update last login timestamp
-      await client.query(
-        'UPDATE users SET updated_at = NOW() WHERE id = $1',
+      // Reset failed login attempts on successful login
+      await this.db.query(
+        `UPDATE users 
+         SET failed_login_attempts = 0, locked_until = NULL, last_login_at = NOW(), updated_at = NOW()
+         WHERE id = $1`,
         [user.id]
       );
 
-      // Return user data without password
-      const { password: _, ...userWithoutPassword } = user;
+      // Generate tokens
+      const accessToken = this.generateAccessToken(user);
+      const refreshToken = await this.generateRefreshToken(user, deviceInfo, ipAddress);
+
+      logger.info('User logged in successfully', {
+        userId: user.id,
+        username: user.username,
+        ipAddress
+      });
 
       return {
-        user: userWithoutPassword,
-        tokens
+        user: {
+          id: user.id,
+          username: user.username,
+          email: user.email,
+          firstName: user.first_name,
+          lastName: user.last_name,
+          isVerified: user.is_verified
+        },
+        tokens: {
+          accessToken,
+          refreshToken,
+          expiresIn: jwtConfig.accessToken.expiresIn
+        }
       };
-    } finally {
-      client.release();
+    } catch (error) {
+      logger.error('User login failed', {
+        error: error.message,
+        username,
+        ipAddress
+      });
+      throw error;
     }
   }
 
-  async register(userData, req = null) {
-    const client = await this.pool.connect();
-    
+  async refreshAccessToken({ refreshToken, deviceInfo, ipAddress }) {
     try {
-      await client.query('BEGIN');
+      const tokenHash = hashToken(refreshToken);
+      const validation = await this.refreshTokenModel.isValid(tokenHash);
 
-      const { email, password, firstName, lastName, role = 'user' } = userData;
-
-      // Check if user already exists
-      const existingUser = await client.query(
-        'SELECT id FROM users WHERE email = $1',
-        [email]
-      );
-
-      if (existingUser.rows.length > 0) {
-        throw new Error('User with this email already exists');
+      if (!validation.valid) {
+        // If token is not found or expired, it might be a rotation attack
+        if (validation.reason === 'Token not found') {
+          // Check if this token belongs to a token family and blacklist the entire family
+          try {
+            const decoded = jwt.decode(refreshToken);
+            if (decoded && decoded.tokenFamily) {
+              await this.refreshTokenModel.blacklistTokenFamily(decoded.tokenFamily);
+              logger.warn('Token rotation attack detected - blacklisted token family', {
+                tokenFamily: decoded.tokenFamily,
+                ipAddress
+              });
+            }
+          } catch (decodeError) {
+            logger.error('Failed to decode potentially malicious refresh token', {
+              error: decodeError.message,
+              ipAddress
+            });
+          }
+        }
+        throw new Error(`Invalid refresh token: ${validation.reason}`);
       }
 
-      // Hash password
-      const saltRounds = parseInt(process.env.BCRYPT_ROUNDS) || 12;
-      const hashedPassword = await bcrypt.hash(password, saltRounds);
+      const storedToken = validation.token;
 
-      // Create user
-      const userQuery = `
-        INSERT INTO users (email, password, first_name, last_name, role)
-        VALUES ($1, $2, $3, $4, $5)
-        RETURNING id, email, first_name, last_name, role, is_verified, 
-                  is_active, created_at, updated_at
-      `;
-      
-      const userValues = [email, hashedPassword, firstName, lastName, role];
-      const userResult = await client.query(userQuery, userValues);
-      const newUser = userResult.rows[0];
+      // Verify JWT signature and extract payload
+      let decoded;
+      try {
+        decoded = jwt.verify(refreshToken, jwtConfig.refreshToken.secret);
+      } catch (jwtError) {
+        await this.refreshTokenModel.blacklist(tokenHash);
+        throw new Error('Invalid refresh token signature');
+      }
 
-      // Extract client information if request object provided
-      let ipAddress = null;
-      let deviceInfo = {};
-      
-      if (req) {
-        ipAddress = getClientIP(req);
-        deviceInfo = sanitizeDeviceInfo(req.headers['user-agent'], {
-          platform: req.headers['x-platform'],
-          browser: req.headers['x-browser'],
-          version: req.headers['x-version']
+      // Get user information
+      const userResult = await this.db.query(
+        'SELECT id, username, email, first_name, last_name, is_verified, is_active FROM users WHERE id = $1 AND is_active = true',
+        [storedToken.user_id]
+      );
+
+      if (userResult.rows.length === 0) {
+        await this.refreshTokenModel.blacklist(tokenHash);
+        throw new Error('User not found or inactive');
+      }
+
+      const user = userResult.rows[0];
+
+      // Update last used timestamp
+      await this.refreshTokenModel.updateLastUsed(tokenHash, ipAddress);
+
+      // Generate new tokens (token rotation)
+      const newAccessToken = this.generateAccessToken(user);
+      const newRefreshToken = await this.generateRefreshToken(user, deviceInfo, ipAddress, decoded.tokenFamily);
+
+      // Blacklist the old refresh token
+      await this.refreshTokenModel.blacklist(tokenHash);
+
+      logger.info('Access token refreshed successfully', {
+        userId: user.id,
+        username: user.username,
+        tokenFamily: decoded.tokenFamily,
+        ipAddress
+      });
+
+      return {
+        user: {
+          id: user.id,
+          username: user.username,
+          email: user.email,
+          firstName: user.first_name,
+          lastName: user.last_name,
+          isVerified: user.is_verified
+        },
+        tokens: {
+          accessToken: newAccessToken,
+          refreshToken: newRefreshToken,
+          expiresIn: jwtConfig.accessToken.expiresIn
+        }
+      };
+    } catch (error) {
+      logger.error('Token refresh failed', {
+        error: error.message,
+        ipAddress
+      });
+      throw error;
+    }
+  }
+
+  async logout({ refreshToken, ipAddress }) {
+    try {
+      if (refreshToken) {
+        const tokenHash = hashToken(refreshToken);
+        await this.refreshTokenModel.blacklist(tokenHash);
+        
+        logger.info('User logged out successfully', {
+          ipAddress,
+          hasRefreshToken: true
         });
       }
 
-      // Generate token pair for automatic login after registration
-      const tokens = await refreshTokenService.generateTokenPair(
-        newUser,
-        deviceInfo,
+      return { success: true };
+    } catch (error) {
+      logger.error('Logout failed', {
+        error: error.message,
         ipAddress
-      );
-
-      await client.query('COMMIT');
-
-      return {
-        user: newUser,
-        tokens
-      };
-    } catch (error) {
-      await client.query('ROLLBACK');
+      });
       throw error;
-    } finally {
-      client.release();
     }
   }
 
-  async logout(refreshToken) {
+  async logoutAll(userId, ipAddress) {
     try {
-      const result = await refreshTokenService.blacklistToken(refreshToken);
-      return result;
-    } catch (error) {
-      console.error('Logout failed:', error.message);
-      throw new Error('Logout failed');
-    }
-  }
-
-  async logoutAllDevices(userId) {
-    try {
-      const result = await refreshTokenService.blacklistAllUserTokens(userId);
-      return result;
-    } catch (error) {
-      console.error('Logout all devices failed:', error.message);
-      throw new Error('Failed to logout from all devices');
-    }
-  }
-
-  async changePassword(userId, currentPassword, newPassword) {
-    const client = await this.pool.connect();
-    
-    try {
-      // Get current user
-      const userQuery = 'SELECT password FROM users WHERE id = $1 AND is_active = true';
-      const userResult = await client.query(userQuery, [userId]);
-      const user = userResult.rows[0];
-
-      if (!user) {
-        throw new Error('User not found');
-      }
-
-      // Verify current password
-      const isValidPassword = await bcrypt.compare(currentPassword, user.password);
-      if (!isValidPassword) {
-        throw new Error('Current password is incorrect');
-      }
-
-      // Hash new password
-      const saltRounds = parseInt(process.env.BCRYPT_ROUNDS) || 12;
-      const hashedPassword = await bcrypt.hash(newPassword, saltRounds);
-
-      // Update password
-      await client.query(
-        'UPDATE users SET password = $1, updated_at = NOW() WHERE id = $2',
-        [hashedPassword, userId]
-      );
-
-      // Logout from all devices for security
-      await this.logoutAllDevices(userId);
-
-      return {
-        success: true,
-        message: 'Password changed successfully. Please login again.'
-      };
-    } finally {
-      client.release();
-    }
-  }
-
-  async resetPassword(email, newPassword, resetToken) {
-    const client = await this.pool.connect();
-    
-    try {
-      await client.query('BEGIN');
-
-      // Verify reset token (this would typically be stored in a separate table)
-      // For now, we'll assume token verification is handled elsewhere
+      const blacklistedCount = await this.refreshTokenModel.blacklistByUserId(userId);
       
-      const userQuery = `
-        SELECT id FROM users 
-        WHERE email = $1 AND is_active = true
-      `;
-      
-      const userResult = await client.query(userQuery, [email]);
-      const user = userResult.rows[0];
+      logger.info('User logged out from all devices', {
+        userId,
+        tokensBlacklisted: blacklistedCount,
+        ipAddress
+      });
 
-      if (!user) {
-        throw new Error('User not found');
-      }
-
-      // Hash new password
-      const saltRounds = parseInt(process.env.BCRYPT_ROUNDS) || 12;
-      const hashedPassword = await bcrypt.hash(newPassword, saltRounds);
-
-      // Update password
-      await client.query(
-        'UPDATE users SET password = $1, updated_at = NOW() WHERE id = $2',
-        [hashedPassword, user.id]
-      );
-
-      // Logout from all devices for security
-      await this.logoutAllDevices(user.id);
-
-      await client.query('COMMIT');
-
-      return {
-        success: true,
-        message: 'Password reset successfully'
-      };
+      return { success: true, tokensRevoked: blacklistedCount };
     } catch (error) {
-      await client.query('ROLLBACK');
+      logger.error('Logout all failed', {
+        error: error.message,
+        userId,
+        ipAddress
+      });
       throw error;
-    } finally {
-      client.release();
     }
   }
 
-  async getUserById(userId) {
-    const client = await this.pool.connect();
+  generateAccessToken(user) {
+    const payload = {
+      userId: user.id,
+      username: user.username,
+      email: user.email,
+      isVerified: user.is_verified
+    };
+
+    return jwt.sign(payload, jwtConfig.accessToken.secret, {
+      expiresIn: jwtConfig.accessToken.expiresIn,
+      issuer: jwtConfig.issuer,
+      audience: jwtConfig.audience
+    });
+  }
+
+  async generateRefreshToken(user, deviceInfo = null, ipAddress = null, existingTokenFamily = null) {
+    const tokenFamily = existingTokenFamily || generateTokenFamily();
     
+    const payload = {
+      userId: user.id,
+      tokenFamily,
+      type: 'refresh'
+    };
+
+    const token = jwt.sign(payload, jwtConfig.refreshToken.secret, {
+      expiresIn: jwtConfig.refreshToken.expiresIn,
+      issuer: jwtConfig.issuer,
+      audience: jwtConfig.audience
+    });
+
+    const tokenHash = hashToken(token);
+
+    // Store in database
+    await this.refreshTokenModel.create({
+      userId: user.id,
+      tokenHash,
+      tokenFamily,
+      deviceInfo,
+      ipAddress
+    });
+
+    return token;
+  }
+
+  async verifyAccessToken(token) {
     try {
-      const userQuery = `
-        SELECT id, email, first_name, last_name, role, is_verified, 
-               is_active, created_at, updated_at
-        FROM users 
-        WHERE id = $1 AND is_active = true
-      `;
+      const decoded = jwt.verify(token, jwtConfig.accessToken.secret);
       
-      const result = await client.query(userQuery, [userId]);
-      return result.rows[0] || null;
-    } finally {
-      client.release();
-    }
-  }
-
-  async verifyEmail(userId) {
-    const client = await this.pool.connect();
-    
-    try {
-      await client.query(
-        'UPDATE users SET is_verified = true, updated_at = NOW() WHERE id = $1',
-        [userId]
+      // Verify user is still active
+      const userResult = await this.db.query(
+        'SELECT id, username, email, is_verified, is_active FROM users WHERE id = $1 AND is_active = true',
+        [decoded.userId]
       );
 
+      if (userResult.rows.length === 0) {
+        throw new Error('User not found or inactive');
+      }
+
       return {
-        success: true,
-        message: 'Email verified successfully'
+        valid: true,
+        user: userResult.rows[0],
+        decoded
       };
-    } finally {
-      client.release();
+    } catch (error) {
+      logger.error('Access token verification failed', {
+        error: error.message
+      });
+      return {
+        valid: false,
+        error: error.message
+      };
     }
   }
 
-  async close() {
-    await this.pool.end();
+  async cleanupExpiredTokens() {
+    try {
+      const expiredCount = await this.refreshTokenModel.deleteExpired();
+      const blacklistedCount = await this.refreshTokenModel.deleteBlacklisted();
+      
+      logger.info('Token cleanup completed', {
+        expiredTokensDeleted: expiredCount,
+        blacklistedTokensDeleted: blacklistedCount
+      });
+
+      return {
+        expiredTokensDeleted: expiredCount,
+        blacklistedTokensDeleted: blacklistedCount
+      };
+    } catch (error) {
+      logger.error('Token cleanup failed', {
+        error: error.message
+      });
+      throw error;
+    }
   }
 }
 
-// Create singleton instance
-const authService = new AuthService();
-
-module.exports = authService;
+module.exports = AuthService;
