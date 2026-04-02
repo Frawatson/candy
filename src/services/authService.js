@@ -1,305 +1,159 @@
-const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
-const { query } = require('../database/connection');
-const { JWT_SECRET, JWT_EXPIRY } = require('../config/jwt');
-const logger = require('../utils/logger');
+const { JWT_SECRET, JWT_REFRESH_SECRET, JWT_EXPIRY, JWT_REFRESH_EXPIRY } = require('../config/jwt');
+const User = require('../models/User');
+const RefreshToken = require('../models/RefreshToken');
+const { generateTokens, hashToken } = require('../utils/tokenUtils');
+const PasswordUtils = require('../utils/passwordUtils');
+
+const { 
+  UnauthorizedError, 
+  NotFoundError, 
+  ValidationError 
+} = require('../utils/errorTypes');
 
 class AuthService {
   /**
-   * Register a new user
-   * @param {Object} userData User registration data
-   * @returns {Promise<Object>} Created user data
+   * Authenticate user with email and password
    */
-  async register(userData) {
-    const { username, email, password } = userData;
+  static async authenticateUser(email, password) {
+    // Find user by email
+    const user = await User.findByEmail(email);
+    if (!user) {
+      throw new UnauthorizedError('Invalid credentials');
+    }
 
-    try {
-      // Check if user already exists
-      const existingUser = await query(
-        'SELECT id FROM users WHERE username = $1 OR email = $2',
-        [username, email]
-      );
+    // Verify password
+    const isValidPassword = await User.verifyPassword(password, user.password);
+    if (!isValidPassword) {
+      throw new UnauthorizedError('Invalid credentials');
+    }
 
-      if (existingUser.rows.length > 0) {
-        throw new Error('User already exists');
-      }
+    return {
+      id: user.id,
+      email: user.email,
+      username: user.username,
+      isEmailVerified: user.is_email_verified
+    };
+  }
 
-      // Hash password
-      const saltRounds = parseInt(process.env.BCRYPT_ROUNDS) || 12;
-      const hashedPassword = await bcrypt.hash(password, saltRounds);
+  /**
+   * Generate and store tokens for user
+   */
+  static async generateUserTokens(user, deviceInfo = {}) {
+    // Generate JWT tokens
+    const { accessToken, refreshToken } = generateTokens({
+      sub: user.id,
+      email: user.email,
+      isEmailVerified: user.isEmailVerified
+    });
 
-      // Insert new user
-      const result = await query(
-        `INSERT INTO users (username, email, password_hash, created_at, updated_at) 
-         VALUES ($1, $2, $3, NOW(), NOW()) 
-         RETURNING id, username, email, created_at`,
-        [username, email, hashedPassword]
-      );
+    // Store refresh token in database
+    await RefreshToken.create({
+      tokenHash: hashToken(refreshToken),
+      userId: user.id,
+      deviceId: deviceInfo.deviceId,
+      deviceName: deviceInfo.deviceName,
+      ipAddress: deviceInfo.ipAddress,
+      userAgent: deviceInfo.userAgent
+    });
 
-      const user = result.rows[0];
-      logger.info('User registered successfully', { userId: user.id, username });
+    return {
+      accessToken,
+      refreshToken,
+      tokenType: 'Bearer',
+      expiresIn: JWT_EXPIRY
+    };
+  }
 
-      return {
+  /**
+   * Refresh access token using refresh token
+   */
+  static async refreshAccessToken(refreshTokenString, deviceInfo = {}) {
+    const tokenHash = hashToken(refreshTokenString);
+
+    // Find refresh token
+    const tokenData = await RefreshToken.findByTokenHash(tokenHash);
+    if (!tokenData) {
+      throw new UnauthorizedError('Invalid refresh token');
+    }
+
+    // Check if token is revoked
+    if (tokenData.is_revoked) {
+      throw new UnauthorizedError('Refresh token has been revoked');
+    }
+
+    // Check if token is expired
+    if (new Date() > tokenData.expires_at) {
+      throw new UnauthorizedError('Refresh token has expired');
+    }
+
+    // Get user data
+    const user = await User.findById(tokenData.user_id);
+    if (!user) {
+      throw new NotFoundError('User not found');
+    }
+
+    // Update last used timestamp
+    await RefreshToken.updateLastUsed(tokenData.id, deviceInfo.ipAddress);
+
+    // Generate new tokens (token rotation)
+    const { accessToken, refreshToken: newRefreshToken } = generateTokens({
+      sub: user.id,
+      email: user.email,
+      isEmailVerified: user.is_email_verified
+    });
+
+    // Revoke old refresh token
+    await RefreshToken.revokeToken(tokenData.id);
+
+    // Store new refresh token
+    await RefreshToken.create({
+      tokenHash: hashToken(newRefreshToken),
+      userId: user.id,
+      deviceId: deviceInfo.deviceId || tokenData.device_id,
+      deviceName: deviceInfo.deviceName || tokenData.device_name,
+      ipAddress: deviceInfo.ipAddress,
+      userAgent: deviceInfo.userAgent
+    });
+
+    return {
+      accessToken,
+      refreshToken: newRefreshToken,
+      tokenType: 'Bearer',
+      expiresIn: JWT_EXPIRY,
+      user: {
         id: user.id,
-        username: user.username,
         email: user.email,
-        createdAt: user.created_at
-      };
-    } catch (error) {
-      logger.error('User registration failed', { username, email, error: error.message });
-      throw error;
-    }
+        username: user.username,
+        isEmailVerified: user.is_email_verified
+      }
+    };
   }
 
   /**
-   * Login user with username/email and password
-   * @param {Object} loginData Login credentials
-   * @returns {Promise<Object>} Login result with tokens
+   * Verify JWT access token
    */
-  async login(loginData) {
-    const { identifier, password } = loginData;
-
-    try {
-      // Find user by username or email
-      const result = await query(
-        `SELECT id, username, email, password_hash, is_verified, is_active 
-         FROM users 
-         WHERE (username = $1 OR email = $1) AND is_active = true`,
-        [identifier]
-      );
-
-      if (result.rows.length === 0) {
-        throw new Error('Invalid credentials');
-      }
-
-      const user = result.rows[0];
-
-      // Verify password
-      const isValidPassword = await bcrypt.compare(password, user.password_hash);
-      if (!isValidPassword) {
-        throw new Error('Invalid credentials');
-      }
-
-      // Check if user is verified (if email verification is required)
-      if (process.env.REQUIRE_EMAIL_VERIFICATION === 'true' && !user.is_verified) {
-        throw new Error('Email verification required');
-      }
-
-      // Generate JWT token
-      const token = jwt.sign(
-        { 
-          userId: user.id, 
-          username: user.username,
-          email: user.email 
-        },
-        JWT_SECRET,
-        { expiresIn: JWT_EXPIRY }
-      );
-
-      // Update last login
-      await query(
-        'UPDATE users SET last_login = NOW(), updated_at = NOW() WHERE id = $1',
-        [user.id]
-      );
-
-      logger.info('User logged in successfully', { userId: user.id, username: user.username });
-
-      return {
-        token,
-        user: {
-          id: user.id,
-          username: user.username,
-          email: user.email,
-          isVerified: user.is_verified
-        }
-      };
-    } catch (error) {
-      logger.error('User login failed', { identifier, error: error.message });
-      throw error;
-    }
-  }
-
-  /**
-   * Verify JWT token
-   * @param {string} token JWT token
-   * @returns {Promise<Object>} Decoded token data
-   */
-  async verifyToken(token) {
+  static async verifyAccessToken(token) {
     try {
       const decoded = jwt.verify(token, JWT_SECRET);
       
-      // Check if user still exists and is active
-      const result = await query(
-        'SELECT id, username, email, is_active FROM users WHERE id = $1 AND is_active = true',
-        [decoded.userId]
-      );
-
-      if (result.rows.length === 0) {
-        throw new Error('User not found or inactive');
+      // Get fresh user data to ensure user still exists and is active
+      const user = await User.findById(decoded.sub);
+      if (!user) {
+        throw new UnauthorizedError('User not found');
       }
 
-      return {
-        ...decoded,
-        user: result.rows[0]
-      };
-    } catch (error) {
-      logger.error('Token verification failed', { error: error.message });
-      throw new Error('Invalid token');
-    }
-  }
-
-  /**
-   * Change user password
-   * @param {number} userId User ID
-   * @param {string} currentPassword Current password
-   * @param {string} newPassword New password
-   * @returns {Promise<void>}
-   */
-  async changePassword(userId, currentPassword, newPassword) {
-    try {
-      // Get current password hash
-      const result = await query(
-        'SELECT password_hash FROM users WHERE id = $1',
-        [userId]
-      );
-
-      if (result.rows.length === 0) {
-        throw new Error('User not found');
-      }
-
-      const user = result.rows[0];
-
-      // Verify current password
-      const isValidPassword = await bcrypt.compare(currentPassword, user.password_hash);
-      if (!isValidPassword) {
-        throw new Error('Invalid current password');
-      }
-
-      // Hash new password
-      const saltRounds = parseInt(process.env.BCRYPT_ROUNDS) || 12;
-      const hashedNewPassword = await bcrypt.hash(newPassword, saltRounds);
-
-      // Update password
-      await query(
-        'UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2',
-        [hashedNewPassword, userId]
-      );
-
-      logger.info('Password changed successfully', { userId });
-    } catch (error) {
-      logger.error('Password change failed', { userId, error: error.message });
-      throw error;
-    }
-  }
-
-  /**
-   * Get user profile by ID
-   * @param {number} userId User ID
-   * @returns {Promise<Object>} User profile data
-   */
-  async getUserProfile(userId) {
-    try {
-      const result = await query(
-        `SELECT id, username, email, is_verified, is_active, created_at, updated_at, last_login
-         FROM users 
-         WHERE id = $1`,
-        [userId]
-      );
-
-      if (result.rows.length === 0) {
-        throw new Error('User not found');
-      }
-
-      const user = result.rows[0];
       return {
         id: user.id,
-        username: user.username,
         email: user.email,
-        isVerified: user.is_verified,
-        isActive: user.is_active,
-        createdAt: user.created_at,
-        updatedAt: user.updated_at,
-        lastLogin: user.last_login
+        username: user.username,
+        isEmailVerified: user.is_email_verified,
+        iat: decoded.iat,
+        exp: decoded.exp
       };
     } catch (error) {
-      logger.error('Failed to get user profile', { userId, error: error.message });
-      throw error;
-    }
-  }
-
-  /**
-   * Update user profile
-   * @param {number} userId User ID
-   * @param {Object} updateData Profile update data
-   * @returns {Promise<Object>} Updated user profile
-   */
-  async updateUserProfile(userId, updateData) {
-    const { username, email } = updateData;
-    
-    try {
-      // Check if new username/email already exists (excluding current user)
-      if (username || email) {
-        const existingUser = await query(
-          `SELECT id FROM users 
-           WHERE (username = $1 OR email = $2) AND id != $3`,
-          [username || '', email || '', userId]
-        );
-
-        if (existingUser.rows.length > 0) {
-          throw new Error('Username or email already exists');
+      if (error instanceof jwt.JsonWebTokenError) {
+        if (error.name === 'TokenExpiredError') {
+          throw new UnauthorizedError('Access token has expired');
         }
-      }
-
-      // Build update query dynamically
-      const updates = [];
-      const values = [];
-      let paramCount = 1;
-
-      if (username) {
-        updates.push(`username = $${paramCount++}`);
-        values.push(username);
-      }
-
-      if (email) {
-        updates.push(`email = $${paramCount++}`);
-        values.push(email);
-      }
-
-      if (updates.length === 0) {
-        throw new Error('No valid update fields provided');
-      }
-
-      updates.push(`updated_at = NOW()`);
-      values.push(userId);
-
-      const query_text = `
-        UPDATE users 
-        SET ${updates.join(', ')} 
-        WHERE id = $${paramCount}
-        RETURNING id, username, email, is_verified, updated_at
-      `;
-
-      const result = await query(query_text, values);
-      
-      if (result.rows.length === 0) {
-        throw new Error('User not found');
-      }
-
-      const user = result.rows[0];
-      logger.info('User profile updated successfully', { userId, username });
-
-      return {
-        id: user.id,
-        username: user.username,
-        email: user.email,
-        isVerified: user.is_verified,
-        updatedAt: user.updated_at
-      };
-    } catch (error) {
-      logger.error('Failed to update user profile', { userId, error: error.message });
-      throw error;
-    }
-  }
-}
-
-module.exports = new AuthService();
+        throw new UnauthorizedError('Invalid access token');
