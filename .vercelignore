@@ -62,7 +62,8 @@ LICENSE
 *.md
 docs/
 .github/
-
+LICENSE.md
+LICENSE
 # Config files
 .eslintrc*
 .prettierrc*
