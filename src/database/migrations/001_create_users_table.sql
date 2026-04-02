@@ -18,4 +18,6 @@ CREATE INDEX IF NOT EXISTS idx_users_created_at ON users(created_at);
 CREATE INDEX IF NOT EXISTS idx_users_email_verified ON users(is_email_verified) WHERE deleted_at IS NULL;
 
 -- Add constraints
-ALTER TABLE users ADD CONSTRAINT users_email_unique UNIQUE (email);
+    email VARCHAR(255) NOT NULL CONSTRAINT users_email_unique UNIQUE,
+
+-- Note: users_email_unique constraint is defined inline above on the email column.
