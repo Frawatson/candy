@@ -1,344 +1,270 @@
-const databaseConnection = require('../database/connection');
-const { hashToken, calculateExpiryDate } = require('../utils/tokenUtils');
-const { jwtConfig } = require('../config/jwt');
 const logger = require('../utils/logger');
 
+/**
+ * RefreshToken model for managing refresh token database operations
+ */
 class RefreshToken {
-  constructor() {
-    this.db = databaseConnection;
+  constructor(dbClient = null) {
+    this.client = dbClient;
   }
 
-  async create({ userId, tokenHash, tokenFamily, expiresAt, deviceInfo = null, ipAddress = null }) {
+  /**
+   * Set database client for this instance
+   * @param {Object} client Database client
+   */
+  setClient(client) {
+    this.client = client;
+  }
+
+  /**
+   * Execute query using the provided client or default connection
+   * @param {string} text SQL query text
+   * @param {Array} params Query parameters
+   * @returns {Promise<Object>} Query result
+   */
+  async query(text, params) {
+    if (this.client) {
+      return await this.client.query(text, params);
+    }
+    
+    // If no client provided, use the global connection
+    const { query } = require('../database/connection');
+    return await query(text, params);
+  }
+
+  /**
+   * Create a new refresh token
+   * @param {Object} tokenData Token data
+   * @returns {Promise<Object>} Created token data
+   */
+  async create(tokenData) {
+    const { userId, token, expiresAt, userAgent = null, ipAddress = null } = tokenData;
+
     try {
-      const query = `
-        INSERT INTO refresh_tokens (
-          user_id, token_hash, expires_at, device_info, ip_address, token_family
-        ) VALUES ($1, $2, $3, $4, $5, $6)
-        RETURNING id, user_id, token_hash, expires_at, is_blacklisted, 
-                  created_at, updated_at, last_used_at, device_info, ip_address
-      `;
-      
-      const values = [
-        userId,
-        tokenHash,
-        expiresAt || calculateExpiryDate(jwtConfig.refreshToken.expiresIn),
-        deviceInfo ? JSON.stringify(deviceInfo) : null,
-        ipAddress,
-        tokenFamily
-      ];
+      const result = await this.query(`
+        INSERT INTO refresh_tokens (user_id, token, expires_at, user_agent, ip_address, created_at, is_active)
+        VALUES ($1, $2, $3, $4, $5, NOW(), true)
+        RETURNING id, user_id, token, expires_at, created_at, is_active
+      `, [userId, token, expiresAt, userAgent, ipAddress]);
 
-      const result = await this.db.query(query, values);
-      
-      logger.debug('Refresh token created', {
-        tokenId: result.rows[0].id,
-        userId,
-        tokenFamily
-      });
+      const createdToken = result.rows[0];
+      logger.debug('Refresh token created', { id: createdToken.id, userId });
 
-      return result.rows[0];
+      return {
+        id: createdToken.id,
+        userId: createdToken.user_id,
+        token: createdToken.token,
+        expiresAt: createdToken.expires_at,
+        createdAt: createdToken.created_at,
+        isActive: createdToken.is_active
+      };
     } catch (error) {
-      logger.error('Failed to create refresh token', {
-        error: error.message,
-        userId,
-        tokenFamily
-      });
+      logger.error('Failed to create refresh token', { userId, error: error.message });
       throw error;
     }
   }
 
-  async findByTokenHash(tokenHash) {
+  /**
+   * Find refresh token by token string
+   * @param {string} token Token string
+   * @returns {Promise<Object|null>} Token data or null if not found
+   */
+  async findByToken(token) {
     try {
-      const query = `
-        SELECT id, user_id, token_hash, expires_at, is_blacklisted,
-               created_at, updated_at, last_used_at, device_info, ip_address, token_family
-        FROM refresh_tokens 
-        WHERE token_hash = $1
-      `;
-      
-      const result = await this.db.query(query, [tokenHash]);
-      return result.rows[0] || null;
-    } catch (error) {
-      logger.error('Failed to find refresh token by hash', {
-        error: error.message,
-        hasTokenHash: !!tokenHash
-      });
-      throw error;
-    }
-  }
-
-  async findByUserId(userId, limit = 10) {
-    try {
-      const query = `
-        SELECT id, user_id, token_hash, expires_at, is_blacklisted,
-               created_at, updated_at, last_used_at, device_info, ip_address, token_family
-        FROM refresh_tokens 
-        WHERE user_id = $1 AND is_blacklisted = false
-        ORDER BY created_at DESC
-        LIMIT $2
-      `;
-      
-      const result = await this.db.query(query, [userId, limit]);
-      return result.rows;
-    } catch (error) {
-      logger.error('Failed to find refresh tokens by user ID', {
-        error: error.message,
-        userId,
-        limit
-      });
-      throw error;
-    }
-  }
-
-  async findByTokenFamily(tokenFamily) {
-    try {
-      const query = `
-        SELECT id, user_id, token_hash, expires_at, is_blacklisted,
-               created_at, updated_at, last_used_at, device_info, ip_address, token_family
-        FROM refresh_tokens 
-        WHERE token_family = $1
-        ORDER BY created_at DESC
-      `;
-      
-      const result = await this.db.query(query, [tokenFamily]);
-      return result.rows;
-    } catch (error) {
-      logger.error('Failed to find refresh tokens by token family', {
-        error: error.message,
-        tokenFamily
-      });
-      throw error;
-    }
-  }
-
-  async updateLastUsed(tokenHash, ipAddress = null) {
-    try {
-      const query = `
-        UPDATE refresh_tokens 
-        SET last_used_at = NOW(), 
-            updated_at = NOW(),
-            ip_address = COALESCE($2, ip_address)
-        WHERE token_hash = $1 AND is_blacklisted = false
-        RETURNING id, user_id, token_hash, expires_at, is_blacklisted,
-                  created_at, updated_at, last_used_at, device_info, ip_address, token_family
-      `;
-      
-      const result = await this.db.query(query, [tokenHash, ipAddress]);
-      
-      if (result.rows[0]) {
-        logger.debug('Refresh token last used updated', {
-          tokenId: result.rows[0].id,
-          userId: result.rows[0].user_id,
-          ipAddress
-        });
-      }
-
-      return result.rows[0] || null;
-    } catch (error) {
-      logger.error('Failed to update refresh token last used', {
-        error: error.message,
-        hasTokenHash: !!tokenHash,
-        ipAddress
-      });
-      throw error;
-    }
-  }
-
-  async blacklist(tokenHash) {
-    try {
-      const query = `
-        UPDATE refresh_tokens 
-        SET is_blacklisted = true, updated_at = NOW()
-        WHERE token_hash = $1
-        RETURNING id, user_id, is_blacklisted
-      `;
-      
-      const result = await this.db.query(query, [tokenHash]);
-      
-      if (result.rows[0]) {
-        logger.info('Refresh token blacklisted', {
-          tokenId: result.rows[0].id,
-          userId: result.rows[0].user_id
-        });
-      }
-
-      return result.rows[0] || null;
-    } catch (error) {
-      logger.error('Failed to blacklist refresh token', {
-        error: error.message,
-        hasTokenHash: !!tokenHash
-      });
-      throw error;
-    }
-  }
-
-  async blacklistByUserId(userId) {
-    try {
-      const query = `
-        UPDATE refresh_tokens 
-        SET is_blacklisted = true, updated_at = NOW()
-        WHERE user_id = $1 AND is_blacklisted = false
-      `;
-      
-      const result = await this.db.query(query, [userId]);
-      
-      logger.info('Refresh tokens blacklisted by user ID', {
-        userId,
-        tokensBlacklisted: result.rowCount
-      });
-
-      return result.rowCount;
-    } catch (error) {
-      logger.error('Failed to blacklist refresh tokens by user ID', {
-        error: error.message,
-        userId
-      });
-      throw error;
-    }
-  }
-
-  async blacklistTokenFamily(tokenFamily) {
-    try {
-      const query = `
-        UPDATE refresh_tokens 
-        SET is_blacklisted = true, updated_at = NOW()
-        WHERE token_family = $1 AND is_blacklisted = false
-      `;
-      
-      const result = await this.db.query(query, [tokenFamily]);
-      
-      logger.info('Refresh token family blacklisted', {
-        tokenFamily,
-        tokensBlacklisted: result.rowCount
-      });
-
-      return result.rowCount;
-    } catch (error) {
-      logger.error('Failed to blacklist refresh token family', {
-        error: error.message,
-        tokenFamily
-      });
-      throw error;
-    }
-  }
-
-  async deleteExpired() {
-    try {
-      const query = `
-        DELETE FROM refresh_tokens 
-        WHERE expires_at < NOW()
-      `;
-      
-      const result = await this.db.query(query);
-      
-      if (result.rowCount > 0) {
-        logger.info('Expired refresh tokens deleted', {
-          tokensDeleted: result.rowCount
-        });
-      }
-
-      return result.rowCount;
-    } catch (error) {
-      logger.error('Failed to delete expired refresh tokens', {
-        error: error.message
-      });
-      throw error;
-    }
-  }
-
-  async deleteBlacklisted(olderThanDays = 30) {
-    try {
-      const query = `
-        DELETE FROM refresh_tokens 
-        WHERE is_blacklisted = true 
-        AND updated_at < NOW() - INTERVAL '${olderThanDays} days'
-      `;
-      
-      const result = await this.db.query(query);
-      
-      if (result.rowCount > 0) {
-        logger.info('Old blacklisted refresh tokens deleted', {
-          tokensDeleted: result.rowCount,
-          olderThanDays
-        });
-      }
-
-      return result.rowCount;
-    } catch (error) {
-      logger.error('Failed to delete blacklisted refresh tokens', {
-        error: error.message,
-        olderThanDays
-      });
-      throw error;
-    }
-  }
-
-  async deleteByUserId(userId) {
-    try {
-      const query = `
-        DELETE FROM refresh_tokens 
-        WHERE user_id = $1
-      `;
-      
-      const result = await this.db.query(query, [userId]);
-      
-      logger.info('Refresh tokens deleted by user ID', {
-        userId,
-        tokensDeleted: result.rowCount
-      });
-
-      return result.rowCount;
-    } catch (error) {
-      logger.error('Failed to delete refresh tokens by user ID', {
-        error: error.message,
-        userId
-      });
-      throw error;
-    }
-  }
-
-  async getStats() {
-    try {
-      const query = `
-        SELECT 
-          COUNT(*) as total_tokens,
-          COUNT(CASE WHEN is_blacklisted = true THEN 1 END) as blacklisted_tokens,
-          COUNT(CASE WHEN expires_at < NOW() THEN 1 END) as expired_tokens,
-          COUNT(CASE WHEN is_blacklisted = false AND expires_at >= NOW() THEN 1 END) as active_tokens
+      const result = await this.query(`
+        SELECT id, user_id, token, expires_at, created_at, last_used, is_active, user_agent, ip_address
         FROM refresh_tokens
-      `;
-      
-      const result = await this.db.query(query);
-      return result.rows[0];
+        WHERE token = $1
+      `, [token]);
+
+      if (result.rows.length === 0) {
+        return null;
+      }
+
+      const tokenData = result.rows[0];
+      return {
+        id: tokenData.id,
+        userId: tokenData.user_id,
+        token: tokenData.token,
+        expiresAt: tokenData.expires_at,
+        createdAt: tokenData.created_at,
+        lastUsed: tokenData.last_used,
+        isActive: tokenData.is_active,
+        userAgent: tokenData.user_agent,
+        ipAddress: tokenData.ip_address
+      };
     } catch (error) {
-      logger.error('Failed to get refresh token stats', {
-        error: error.message
-      });
+      logger.error('Failed to find refresh token', { error: error.message });
       throw error;
     }
   }
 
-  async isValid(tokenHash) {
+  /**
+   * Find refresh token by ID
+   * @param {number} id Token ID
+   * @returns {Promise<Object|null>} Token data or null if not found
+   */
+  async findById(id) {
     try {
-      const token = await this.findByTokenHash(tokenHash);
-      
-      if (!token) {
-        return { valid: false, reason: 'Token not found' };
+      const result = await this.query(`
+        SELECT id, user_id, token, expires_at, created_at, last_used, is_active, user_agent, ip_address
+        FROM refresh_tokens
+        WHERE id = $1
+      `, [id]);
+
+      if (result.rows.length === 0) {
+        return null;
       }
-      
-      if (token.is_blacklisted) {
-        return { valid: false, reason: 'Token is blacklisted' };
-      }
-      
-      if (new Date(token.expires_at) < new Date()) {
-        return { valid: false, reason: 'Token expired' };
-      }
-      
-      return { valid: true, token };
+
+      const tokenData = result.rows[0];
+      return {
+        id: tokenData.id,
+        userId: tokenData.user_id,
+        token: tokenData.token,
+        expiresAt: tokenData.expires_at,
+        createdAt: tokenData.created_at,
+        lastUsed: tokenData.last_used,
+        isActive: tokenData.is_active,
+        userAgent: tokenData.user_agent,
+        ipAddress: tokenData.ip_address
+      };
     } catch (error) {
-      logger.error('Failed to validate refresh token', {
-        error: error.message,
-        hasTokenHash: !!tokenHash
-      });
+      logger.error('Failed to find refresh token by ID', { id, error: error.message });
+      throw error;
+    }
+  }
+
+  /**
+   * Update last used timestamp and usage information
+   * @param {number} id Token ID
+   * @param {string} userAgent User agent string
+   * @param {string} ipAddress IP address
+   * @returns {Promise<boolean>} True if updated successfully
+   */
+  async updateLastUsed(id, userAgent = null, ipAddress = null) {
+    try {
+      const result = await this.query(`
+        UPDATE refresh_tokens 
+        SET last_used = NOW(), user_agent = COALESCE($2, user_agent), ip_address = COALESCE($3, ip_address)
+        WHERE id = $1 AND is_active = true
+      `, [id, userAgent, ipAddress]);
+
+      const updated = result.rowCount > 0;
+      
+      if (updated) {
+        logger.debug('Refresh token last used updated', { id });
+      }
+
+      return updated;
+    } catch (error) {
+      logger.error('Failed to update refresh token last used', { id, error: error.message });
+      throw error;
+    }
+  }
+
+  /**
+   * Revoke a refresh token
+   * @param {number} id Token ID
+   * @returns {Promise<boolean>} True if revoked successfully
+   */
+  async revoke(id) {
+    try {
+      const result = await this.query(`
+        UPDATE refresh_tokens 
+        SET is_active = false, revoked_at = NOW()
+        WHERE id = $1 AND is_active = true
+      `, [id]);
+
+      const revoked = result.rowCount > 0;
+      
+      if (revoked) {
+        logger.debug('Refresh token revoked', { id });
+      }
+
+      return revoked;
+    } catch (error) {
+      logger.error('Failed to revoke refresh token', { id, error: error.message });
+      throw error;
+    }
+  }
+
+  /**
+   * Delete a refresh token permanently
+   * @param {number} id Token ID
+   * @returns {Promise<boolean>} True if deleted successfully
+   */
+  async delete(id) {
+    try {
+      const result = await this.query(
+        'DELETE FROM refresh_tokens WHERE id = $1',
+        [id]
+      );
+
+      const deleted = result.rowCount > 0;
+      
+      if (deleted) {
+        logger.debug('Refresh token deleted', { id });
+      }
+
+      return deleted;
+    } catch (error) {
+      logger.error('Failed to delete refresh token', { id, error: error.message });
+      throw error;
+    }
+  }
+
+  /**
+   * Get all active refresh tokens for a user
+   * @param {number} userId User ID
+   * @returns {Promise<Array>} Array of token data
+   */
+  async findByUserId(userId) {
+    try {
+      const result = await this.query(`
+        SELECT id, user_id, token, expires_at, created_at, last_used, is_active, user_agent, ip_address
+        FROM refresh_tokens
+        WHERE user_id = $1 AND is_active = true AND expires_at > NOW()
+        ORDER BY created_at DESC
+      `, [userId]);
+
+      return result.rows.map(row => ({
+        id: row.id,
+        userId: row.user_id,
+        token: row.token,
+        expiresAt: row.expires_at,
+        createdAt: row.created_at,
+        lastUsed: row.last_used,
+        isActive: row.is_active,
+        userAgent: row.user_agent,
+        ipAddress: row.ip_address
+      }));
+    } catch (error) {
+      logger.error('Failed to find refresh tokens by user ID', { userId, error: error.message });
+      throw error;
+    }
+  }
+
+  /**
+   * Clean up expired tokens for a specific user
+   * @param {number} userId User ID
+   * @returns {Promise<number>} Number of tokens cleaned up
+   */
+  async cleanupExpiredForUser(userId) {
+    try {
+      const result = await this.query(
+        'DELETE FROM refresh_tokens WHERE user_id = $1 AND expires_at < NOW()',
+        [userId]
+      );
+
+      const deletedCount = result.rowCount;
+      
+      if (deletedCount > 0) {
+        logger.debug('Expired refresh tokens cleaned up for user', { userId, count: deletedCount });
+      }
+
+      return deletedCount;
+    } catch (error) {
+      logger.error('Failed to cleanup expired tokens for user', { userId, error: error.message });
       throw error;
     }
   }

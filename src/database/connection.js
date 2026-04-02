@@ -1,169 +1,126 @@
-const { pool, connectWithRetry } = require('../config/database');
+const databasePool = require('./pool');
+const { getDatabaseConfig } = require('../config/database');
 const logger = require('../utils/logger');
+const { validateDatabaseConfig, waitForDatabase } = require('../utils/databaseHealth');
 
-class DatabaseConnection {
-  constructor() {
-    this.pool = pool;
-    this.isHealthy = false;
-    this.lastHealthCheck = null;
-    this.healthCheckInterval = null;
+/**
+ * Initialize database connection with proper error handling and validation
+ * @returns {Promise<Pool>} Initialized database pool
+ */
+async function initializeDatabase() {
+  try {
+    // Get database configuration
+    const config = getDatabaseConfig();
     
-    // Initialize connection and start health monitoring
-    this.initialize();
-  }
-
-  async initialize() {
-    try {
-      await connectWithRetry();
-      this.isHealthy = true;
-      this.startHealthMonitoring();
-      logger.info('Database connection initialized successfully');
-    } catch (error) {
-      logger.error('Failed to initialize database connection', {
-        error: error.message,
-        stack: error.stack
-      });
-      this.isHealthy = false;
-      throw error;
+    // Validate configuration
+    const validation = validateDatabaseConfig(config);
+    if (!validation.valid) {
+      const errors = validation.errors.join(', ');
+      throw new Error(`Invalid database configuration: ${errors}`);
     }
-  }
 
-  async query(text, params = []) {
-    const start = Date.now();
-    let client;
-
-    try {
-      client = await this.pool.connect();
-      const result = await client.query(text, params);
-      
-      const duration = Date.now() - start;
-      logger.debug('Database query executed', {
-        duration,
-        rowCount: result.rowCount,
-        command: result.command
+    // Log warnings if any
+    if (validation.warnings.length > 0) {
+      validation.warnings.forEach(warning => {
+        logger.warn(`Database config warning: ${warning}`);
       });
-      
-      return result;
-    } catch (error) {
-      const duration = Date.now() - start;
-      logger.error('Database query failed', {
-        error: error.message,
-        duration,
-        query: text.substring(0, 100) + (text.length > 100 ? '...' : ''),
-        params: params.length > 0 ? '[PARAMS_PROVIDED]' : '[]'
-      });
-      throw error;
-    } finally {
-      if (client) {
-        client.release();
-      }
     }
-  }
 
-  async transaction(callback) {
-    const client = await this.pool.connect();
-    const start = Date.now();
+    // Initialize the connection pool
+    const pool = databasePool.initialize(config);
     
-    try {
-      await client.query('BEGIN');
-      const result = await callback(client);
-      await client.query('COMMIT');
-      
-      const duration = Date.now() - start;
-      logger.debug('Database transaction completed', { duration });
-      
-      return result;
-    } catch (error) {
-      await client.query('ROLLBACK');
-      const duration = Date.now() - start;
-      
-      logger.error('Database transaction failed and rolled back', {
-        error: error.message,
-        duration
-      });
-      
-      throw error;
-    } finally {
-      client.release();
+    // Wait for database to be available
+    const isAvailable = await waitForDatabase(10, 2000);
+    if (!isAvailable) {
+      throw new Error('Database connection could not be established after multiple attempts');
     }
-  }
 
-  async healthCheck() {
-    try {
-      const start = Date.now();
-      const result = await this.query('SELECT 1 as health_check');
-      const duration = Date.now() - start;
-      
-      this.isHealthy = result.rows.length > 0;
-      this.lastHealthCheck = new Date();
-      
-      logger.debug('Database health check completed', {
-        healthy: this.isHealthy,
-        duration,
-        totalConnections: this.pool.totalCount,
-        idleConnections: this.pool.idleCount,
-        waitingCount: this.pool.waitingCount
-      });
-      
-      return {
-        healthy: this.isHealthy,
-        responseTime: duration,
-        timestamp: this.lastHealthCheck,
-        poolStats: this.getPoolStats()
-      };
-    } catch (error) {
-      this.isHealthy = false;
-      this.lastHealthCheck = new Date();
-      
-      logger.error('Database health check failed', {
-        error: error.message,
-        timestamp: this.lastHealthCheck
-      });
-      
-      return {
-        healthy: false,
-        error: error.message,
-        timestamp: this.lastHealthCheck,
-        poolStats: this.getPoolStats()
-      };
-    }
-  }
-
-  getPoolStats() {
-    return {
-      totalCount: this.pool.totalCount,
-      idleCount: this.pool.idleCount,
-      waitingCount: this.pool.waitingCount,
-      maxConnections: this.pool.options.max,
-      minConnections: this.pool.options.min
-    };
-  }
-
-  startHealthMonitoring() {
-    // Perform health check every 30 seconds
-    this.healthCheckInterval = setInterval(async () => {
-      await this.healthCheck();
-    }, 30000);
-    
-    logger.info('Database health monitoring started');
-  }
-
-  stopHealthMonitoring() {
-    if (this.healthCheckInterval) {
-      clearInterval(this.healthCheckInterval);
-      this.healthCheckInterval = null;
-      logger.info('Database health monitoring stopped');
-    }
-  }
-
-  async close() {
-    this.stopHealthMonitoring();
-    await this.pool.end();
-    logger.info('Database connection closed');
+    logger.info('Database connection initialized successfully');
+    return pool;
+  } catch (error) {
+    logger.error('Failed to initialize database connection:', error);
+    throw error;
   }
 }
 
-// Create singleton instance
-const databaseConnection = new DatabaseConnection();
+/**
+ * Get the database pool instance
+ * @returns {Pool} Database connection pool
+ */
+function getDatabase() {
+  return databasePool.getPool();
+}
 
-module.exports = databaseConnection;
+/**
+ * Execute a database query
+ * @param {string} text SQL query text
+ * @param {Array} params Query parameters
+ * @returns {Promise<Object>} Query result
+ */
+async function query(text, params) {
+  return await databasePool.query(text, params);
+}
+
+/**
+ * Get a database client from the pool
+ * @returns {Promise<Client>} Database client
+ */
+async function getClient() {
+  return await databasePool.getClient();
+}
+
+/**
+ * Execute a database transaction
+ * @param {Function} callback Transaction callback function
+ * @returns {Promise<any>} Transaction result
+ */
+async function transaction(callback) {
+  const client = await getClient();
+  
+  try {
+    await client.query('BEGIN');
+    const result = await callback(client);
+    await client.query('COMMIT');
+    return result;
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+/**
+ * Close the database connection pool
+ * @returns {Promise<void>}
+ */
+async function closeDatabase() {
+  await databasePool.close();
+}
+
+/**
+ * Get database pool statistics
+ * @returns {Object|null} Pool statistics or null if not initialized
+ */
+function getPoolStats() {
+  return databasePool.getPoolStats();
+}
+
+/**
+ * Perform database health check
+ * @returns {Promise<boolean>} True if database is healthy
+ */
+async function healthCheck() {
+  return await databasePool.healthCheck();
+}
+
+module.exports = {
+  initializeDatabase,
+  getDatabase,
+  query,
+  getClient,
+  transaction,
+  closeDatabase,
+  getPoolStats,
+  healthCheck
+};

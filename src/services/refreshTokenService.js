@@ -1,322 +1,256 @@
-const databaseConnection = require('../database/connection');
+const crypto = require('crypto');
+const jwt = require('jsonwebtoken');
+const { query, transaction } = require('../database/connection');
+const { JWT_REFRESH_SECRET, JWT_REFRESH_EXPIRY, JWT_SECRET, JWT_EXPIRY } = require('../config/jwt');
 const RefreshToken = require('../models/RefreshToken');
 const logger = require('../utils/logger');
 
 class RefreshTokenService {
-  constructor() {
-    this.db = databaseConnection;
-    this.refreshTokenModel = new RefreshToken();
-  }
-
-  async createToken(tokenData) {
+  /**
+   * Generate a new refresh token for a user
+   * @param {number} userId User ID
+   * @param {string} userAgent User agent string
+   * @param {string} ipAddress Client IP address
+   * @returns {Promise<Object>} Refresh token data
+   */
+  async generateRefreshToken(userId, userAgent = null, ipAddress = null) {
     try {
-      const token = await this.refreshTokenModel.create(tokenData);
-      
-      logger.debug('Refresh token created via service', {
-        tokenId: token.id,
-        userId: token.user_id,
-        tokenFamily: token.token_family
-      });
+      return await transaction(async (client) => {
+        // Generate a secure random token
+        const token = crypto.randomBytes(40).toString('hex');
+        
+        // Calculate expiry date
+        const expiryHours = parseInt(JWT_REFRESH_EXPIRY.replace('h', '')) || 168; // Default 7 days
+        const expiresAt = new Date();
+        expiresAt.setHours(expiresAt.getHours() + expiryHours);
 
-      return token;
-    } catch (error) {
-      logger.error('Failed to create refresh token via service', {
-        error: error.message,
-        userId: tokenData.userId
-      });
-      throw error;
-    }
-  }
-
-  async findTokenByHash(tokenHash) {
-    try {
-      return await this.refreshTokenModel.findByTokenHash(tokenHash);
-    } catch (error) {
-      logger.error('Failed to find token by hash via service', {
-        error: error.message
-      });
-      throw error;
-    }
-  }
-
-  async findTokensByUserId(userId, limit = 10) {
-    try {
-      return await this.refreshTokenModel.findByUserId(userId, limit);
-    } catch (error) {
-      logger.error('Failed to find tokens by user ID via service', {
-        error: error.message,
-        userId
-      });
-      throw error;
-    }
-  }
-
-  async findTokensByFamily(tokenFamily) {
-    try {
-      return await this.refreshTokenModel.findByTokenFamily(tokenFamily);
-    } catch (error) {
-      logger.error('Failed to find tokens by family via service', {
-        error: error.message,
-        tokenFamily
-      });
-      throw error;
-    }
-  }
-
-  async updateTokenLastUsed(tokenHash, ipAddress = null) {
-    try {
-      const updatedToken = await this.refreshTokenModel.updateLastUsed(tokenHash, ipAddress);
-      
-      if (updatedToken) {
-        logger.debug('Token last used updated via service', {
-          tokenId: updatedToken.id,
-          userId: updatedToken.user_id
+        // Create refresh token record
+        const refreshToken = new RefreshToken(client);
+        const tokenData = await refreshToken.create({
+          userId,
+          token,
+          expiresAt,
+          userAgent,
+          ipAddress
         });
+
+        logger.info('Refresh token generated', { userId, tokenId: tokenData.id });
+        
+        return {
+          id: tokenData.id,
+          token: tokenData.token,
+          expiresAt: tokenData.expiresAt
+        };
+      });
+    } catch (error) {
+      logger.error('Failed to generate refresh token', { userId, error: error.message });
+      throw error;
+    }
+  }
+
+  /**
+   * Validate and use a refresh token to generate new access token
+   * @param {string} token Refresh token string
+   * @param {string} userAgent User agent string
+   * @param {string} ipAddress Client IP address
+   * @returns {Promise<Object>} New access token and refresh token
+   */
+  async refreshAccessToken(token, userAgent = null, ipAddress = null) {
+    try {
+      return await transaction(async (client) => {
+        // Find and validate refresh token
+        const refreshToken = new RefreshToken(client);
+        const tokenData = await refreshToken.findByToken(token);
+
+        if (!tokenData) {
+          throw new Error('Invalid refresh token');
+        }
+
+        if (new Date() > tokenData.expiresAt) {
+          // Remove expired token
+          await refreshToken.delete(tokenData.id);
+          throw new Error('Refresh token expired');
+        }
+
+        if (!tokenData.isActive) {
+          throw new Error('Refresh token revoked');
+        }
+
+        // Get user data
+        const userResult = await client.query(
+          'SELECT id, username, email, is_active FROM users WHERE id = $1 AND is_active = true',
+          [tokenData.userId]
+        );
+
+        if (userResult.rows.length === 0) {
+          throw new Error('User not found or inactive');
+        }
+
+        const user = userResult.rows[0];
+
+        // Generate new access token
+        const accessToken = jwt.sign(
+          {
+            userId: user.id,
+            username: user.username,
+            email: user.email
+          },
+          JWT_SECRET,
+          { expiresIn: JWT_EXPIRY }
+        );
+
+        // Update refresh token usage
+        await refreshToken.updateLastUsed(tokenData.id, userAgent, ipAddress);
+
+        // Generate new refresh token for security (token rotation)
+        const newRefreshTokenData = await this.generateRefreshToken(
+          user.id,
+          userAgent,
+          ipAddress
+        );
+
+        // Revoke old refresh token
+        await refreshToken.revoke(tokenData.id);
+
+        logger.info('Access token refreshed', { userId: user.id, oldTokenId: tokenData.id, newTokenId: newRefreshTokenData.id });
+
+        return {
+          accessToken,
+          refreshToken: newRefreshTokenData.token,
+          expiresAt: newRefreshTokenData.expiresAt,
+          user: {
+            id: user.id,
+            username: user.username,
+            email: user.email
+          }
+        };
+      });
+    } catch (error) {
+      logger.error('Failed to refresh access token', { error: error.message });
+      throw error;
+    }
+  }
+
+  /**
+   * Revoke a specific refresh token
+   * @param {string} token Refresh token to revoke
+   * @returns {Promise<boolean>} True if revoked successfully
+   */
+  async revokeRefreshToken(token) {
+    try {
+      const result = await query(
+        'UPDATE refresh_tokens SET is_active = false, revoked_at = NOW() WHERE token = $1 AND is_active = true',
+        [token]
+      );
+
+      const revoked = result.rowCount > 0;
+      
+      if (revoked) {
+        logger.info('Refresh token revoked', { token: token.substring(0, 10) + '...' });
       }
 
-      return updatedToken;
+      return revoked;
     } catch (error) {
-      logger.error('Failed to update token last used via service', {
-        error: error.message,
-        ipAddress
-      });
+      logger.error('Failed to revoke refresh token', { error: error.message });
       throw error;
     }
   }
 
-  async blacklistToken(tokenHash) {
+  /**
+   * Revoke all refresh tokens for a user
+   * @param {number} userId User ID
+   * @returns {Promise<number>} Number of tokens revoked
+   */
+  async revokeAllUserTokens(userId) {
     try {
-      const blacklistedToken = await this.refreshTokenModel.blacklist(tokenHash);
-      
-      if (blacklistedToken) {
-        logger.info('Token blacklisted via service', {
-          tokenId: blacklistedToken.id,
-          userId: blacklistedToken.user_id
-        });
-      }
+      const result = await query(
+        'UPDATE refresh_tokens SET is_active = false, revoked_at = NOW() WHERE user_id = $1 AND is_active = true',
+        [userId]
+      );
 
-      return blacklistedToken;
+      const revokedCount = result.rowCount;
+      logger.info('All user refresh tokens revoked', { userId, count: revokedCount });
+      
+      return revokedCount;
     } catch (error) {
-      logger.error('Failed to blacklist token via service', {
-        error: error.message
-      });
+      logger.error('Failed to revoke all user tokens', { userId, error: error.message });
       throw error;
     }
   }
 
-  async blacklistUserTokens(userId) {
+  /**
+   * Get all active refresh tokens for a user
+   * @param {number} userId User ID
+   * @returns {Promise<Array>} Array of refresh token data
+   */
+  async getUserRefreshTokens(userId) {
     try {
-      const blacklistedCount = await this.refreshTokenModel.blacklistByUserId(userId);
-      
-      logger.info('User tokens blacklisted via service', {
-        userId,
-        tokensBlacklisted: blacklistedCount
-      });
+      const result = await query(`
+        SELECT id, token, created_at, expires_at, last_used, user_agent, ip_address
+        FROM refresh_tokens 
+        WHERE user_id = $1 AND is_active = true AND expires_at > NOW()
+        ORDER BY created_at DESC
+      `, [userId]);
 
-      return blacklistedCount;
+      return result.rows.map(row => ({
+        id: row.id,
+        token: row.token.substring(0, 10) + '...', // Partial token for security
+        createdAt: row.created_at,
+        expiresAt: row.expires_at,
+        lastUsed: row.last_used,
+        userAgent: row.user_agent,
+        ipAddress: row.ip_address
+      }));
     } catch (error) {
-      logger.error('Failed to blacklist user tokens via service', {
-        error: error.message,
-        userId
-      });
+      logger.error('Failed to get user refresh tokens', { userId, error: error.message });
       throw error;
     }
   }
 
-  async blacklistTokenFamily(tokenFamily) {
-    try {
-      const blacklistedCount = await this.refreshTokenModel.blacklistTokenFamily(tokenFamily);
-      
-      logger.info('Token family blacklisted via service', {
-        tokenFamily,
-        tokensBlacklisted: blacklistedCount
-      });
-
-      return blacklistedCount;
-    } catch (error) {
-      logger.error('Failed to blacklist token family via service', {
-        error: error.message,
-        tokenFamily
-      });
-      throw error;
-    }
-  }
-
-  async validateToken(tokenHash) {
-    try {
-      const validation = await this.refreshTokenModel.isValid(tokenHash);
-      
-      logger.debug('Token validation completed via service', {
-        valid: validation.valid,
-        reason: validation.reason
-      });
-
-      return validation;
-    } catch (error) {
-      logger.error('Failed to validate token via service', {
-        error: error.message
-      });
-      throw error;
-    }
-  }
-
+  /**
+   * Clean up expired refresh tokens
+   * @returns {Promise<number>} Number of tokens cleaned up
+   */
   async cleanupExpiredTokens() {
     try {
-      const deletedCount = await this.refreshTokenModel.deleteExpired();
+      const result = await query(
+        'DELETE FROM refresh_tokens WHERE expires_at < NOW()'
+      );
+
+      const deletedCount = result.rowCount;
       
       if (deletedCount > 0) {
-        logger.info('Expired tokens cleaned up via service', {
-          tokensDeleted: deletedCount
-        });
+        logger.info('Expired refresh tokens cleaned up', { count: deletedCount });
       }
 
       return deletedCount;
     } catch (error) {
-      logger.error('Failed to cleanup expired tokens via service', {
-        error: error.message
-      });
+      logger.error('Failed to cleanup expired tokens', { error: error.message });
       throw error;
     }
   }
 
-  async cleanupBlacklistedTokens(olderThanDays = 30) {
+  /**
+   * Get refresh token statistics
+   * @returns {Promise<Object>} Token statistics
+   */
+  async getTokenStatistics() {
     try {
-      const deletedCount = await this.refreshTokenModel.deleteBlacklisted(olderThanDays);
-      
-      if (deletedCount > 0) {
-        logger.info('Blacklisted tokens cleaned up via service', {
-          tokensDeleted: deletedCount,
-          olderThanDays
-        });
-      }
+      const result = await query(`
+        SELECT 
+          COUNT(*) as total_tokens,
+          COUNT(*) FILTER (WHERE is_active = true) as active_tokens,
+          COUNT(*) FILTER (WHERE expires_at < NOW()) as expired_tokens,
+          COUNT(*) FILTER (WHERE is_active = false AND revoked_at IS NOT NULL) as revoked_tokens
+        FROM refresh_tokens
+      `);
 
-      return deletedCount;
+      return result.rows[0];
     } catch (error) {
-      logger.error('Failed to cleanup blacklisted tokens via service', {
-        error: error.message,
-        olderThanDays
-      });
-      throw error;
-    }
-  }
-
-  async deleteUserTokens(userId) {
-    try {
-      const deletedCount = await this.refreshTokenModel.deleteByUserId(userId);
-      
-      logger.info('User tokens deleted via service', {
-        userId,
-        tokensDeleted: deletedCount
-      });
-
-      return deletedCount;
-    } catch (error) {
-      logger.error('Failed to delete user tokens via service', {
-        error: error.message,
-        userId
-      });
-      throw error;
-    }
-  }
-
-  async getTokenStats() {
-    try {
-      const stats = await this.refreshTokenModel.getStats();
-      
-      logger.debug('Token stats retrieved via service', stats);
-
-      return {
-        totalTokens: parseInt(stats.total_tokens),
-        blacklistedTokens: parseInt(stats.blacklisted_tokens),
-        expiredTokens: parseInt(stats.expired_tokens),
-        activeTokens: parseInt(stats.active_tokens)
-      };
-    } catch (error) {
-      logger.error('Failed to get token stats via service', {
-        error: error.message
-      });
-      throw error;
-    }
-  }
-
-  async performMaintenance() {
-    try {
-      logger.info('Starting refresh token maintenance');
-
-      const expiredDeleted = await this.cleanupExpiredTokens();
-      const blacklistedDeleted = await this.cleanupBlacklistedTokens();
-      const stats = await this.getTokenStats();
-
-      const maintenanceResult = {
-        expiredTokensDeleted: expiredDeleted,
-        blacklistedTokensDeleted: blacklistedDeleted,
-        currentStats: stats,
-        completedAt: new Date()
-      };
-
-      logger.info('Refresh token maintenance completed', maintenanceResult);
-
-      return maintenanceResult;
-    } catch (error) {
-      logger.error('Refresh token maintenance failed', {
-        error: error.message
-      });
-      throw error;
-    }
-  }
-
-  async getActiveSessionsForUser(userId) {
-    try {
-      const tokens = await this.findTokensByUserId(userId);
-      
-      const sessions = tokens.map(token => ({
-        id: token.id,
-        deviceInfo: token.device_info ? JSON.parse(token.device_info) : null,
-        ipAddress: token.ip_address,
-        createdAt: token.created_at,
-        lastUsedAt: token.last_used_at,
-        tokenFamily: token.token_family
-      }));
-
-      logger.debug('Active sessions retrieved for user via service', {
-        userId,
-        sessionCount: sessions.length
-      });
-
-      return sessions;
-    } catch (error) {
-      logger.error('Failed to get active sessions for user via service', {
-        error: error.message,
-        userId
-      });
-      throw error;
-    }
-  }
-
-  async revokeSession(userId, tokenFamily) {
-    try {
-      const blacklistedCount = await this.blacklistTokenFamily(tokenFamily);
-      
-      if (blacklistedCount === 0) {
-        throw new Error('Session not found or already revoked');
-      }
-
-      logger.info('Session revoked via service', {
-        userId,
-        tokenFamily,
-        tokensRevoked: blacklistedCount
-      });
-
-      return { success: true, tokensRevoked: blacklistedCount };
-    } catch (error) {
-      logger.error('Failed to revoke session via service', {
-        error: error.message,
-        userId,
-        tokenFamily
-      });
+      logger.error('Failed to get token statistics', { error: error.message });
       throw error;
     }
   }
 }
 
-module.exports = RefreshTokenService;
+module.exports = new RefreshTokenService();
