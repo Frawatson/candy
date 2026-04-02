@@ -187,7 +187,9 @@ async function gracefulShutdown(signal) {
     clearTimeout(shutdownTimeout);
     process.exit(1);
   }
-}
+const TOKEN_SECRET = process.env.TOKEN_SECRET;
+if (!TOKEN_SECRET) { throw new Error('TOKEN_SECRET environment variable is required'); }
+const tokenHash = crypto.createHmac('sha256', TOKEN_SECRET);
 
 // Handle shutdown signals
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
