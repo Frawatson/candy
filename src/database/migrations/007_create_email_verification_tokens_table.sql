@@ -32,4 +32,7 @@ CREATE INDEX IF NOT EXISTS idx_email_verification_tokens_active
 -- Add cleanup index
 CREATE INDEX IF NOT EXISTS idx_email_verification_tokens_cleanup 
     ON email_verification_tokens(expires_at) 
-    WHERE is_used = TRUE OR expires_at < NOW();
+-- Add composite index for active tokens (predicate uses only static columns; expires_at range filtering is handled at query time)
+    WHERE is_used = FALSE;
+-- Add cleanup index for expired/used tokens (volatile NOW() removed; planner uses expires_at index for range scans)
+    WHERE is_used = TRUE;
