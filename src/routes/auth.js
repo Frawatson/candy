@@ -9,17 +9,31 @@ const { generateTokens, generateSecureToken, hashToken } = require('../utils/tok
 const PasswordUtils = require('../utils/passwordUtils');
 const emailService = require('../services/emailService');
 const pool = require('../database/pool');
-const { authRateLimit } = require('../middleware/rateLimiter');
-
 const { 
   ValidationError, 
   UnauthorizedError, 
   NotFoundError,
   ConflictError 
 } = require('../utils/errorTypes');
+const logger = require('../utils/logger');
 
 // Apply rate limiting to all auth routes
+const { authRateLimit } = require('../middleware/rateLimiter');
 router.use(authRateLimit);
+
+/**
+ * Get base URL for email links
+ */
+function getBaseUrl(req) {
+  return process.env.BASE_URL || `${req.protocol}://${req.get('host')}`;
+}
+
+/**
+ * Generate correlation ID for request tracking
+ */
+function generateCorrelationId() {
+  return crypto.randomUUID();
+}
 
 /**
  * @swagger
@@ -58,7 +72,14 @@ router.post('/register', [
     .isLength({ min: 3, max: 30 })
     .withMessage('Username must be between 3 and 30 characters')
 ], async (req, res, next) => {
+  const correlationId = generateCorrelationId();
+  
   try {
+    logger.info('User registration attempt', { 
+      email: req.body.email?.substring(0, 10) + '...',
+      correlationId 
+    });
+
     // Validate request
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
@@ -120,13 +141,26 @@ router.post('/register', [
       client.release();
     }
 
-    // Send verification email
+    // Send verification email with proper data structure
     try {
-      await emailService.sendEmailVerification(user.email, verificationToken);
+      await emailService.sendEmailVerification(user.email, {
+        name: user.username || user.email.split('@')[0],
+        verificationToken,
+        baseUrl: getBaseUrl(req)
+      }, correlationId);
     } catch (error) {
-      console.error('Failed to send verification email:', error);
+      logger.error('Failed to send verification email', { 
+        error: error.message, 
+        correlationId 
+      });
       // Don't fail registration if email fails
     }
+
+    logger.info('User registered successfully', { 
+      userId: user.id,
+      email: user.email?.substring(0, 10) + '...',
+      correlationId 
+    });
 
     res.status(201).json({
       success: true,
@@ -144,6 +178,10 @@ router.post('/register', [
       }
     });
   } catch (error) {
+    logger.error('Registration failed', { 
+      error: error.message, 
+      correlationId 
+    });
     next(error);
   }
 });
@@ -179,7 +217,14 @@ router.post('/login', [
     .notEmpty()
     .withMessage('Password is required')
 ], async (req, res, next) => {
+  const correlationId = generateCorrelationId();
+  
   try {
+    logger.info('User login attempt', { 
+      email: req.body.email?.substring(0, 10) + '...',
+      correlationId 
+    });
+
     // Validate request
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
@@ -218,6 +263,12 @@ router.post('/login', [
       userAgent: req.headers['user-agent']
     });
 
+    logger.info('User logged in successfully', { 
+      userId: user.id,
+      email: user.email?.substring(0, 10) + '...',
+      correlationId 
+    });
+
     res.json({
       success: true,
       message: 'Login successful',
@@ -234,6 +285,10 @@ router.post('/login', [
       }
     });
   } catch (error) {
+    logger.error('Login failed', { 
+      error: error.message, 
+      correlationId 
+    });
     next(error);
   }
 });
@@ -269,6 +324,8 @@ router.post('/verify-email', [
     .notEmpty()
     .withMessage('Token is required')
 ], async (req, res, next) => {
+  const correlationId = generateCorrelationId();
+  
   try {
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
@@ -277,6 +334,8 @@ router.post('/verify-email', [
 
     const { token } = req.body;
     const tokenHash = hashToken(token);
+
+    logger.info('Email verification attempt', { correlationId });
 
     const client = await pool.connect();
     try {
@@ -316,6 +375,11 @@ router.post('/verify-email', [
 
       await client.query('COMMIT');
 
+      logger.info('Email verified successfully', { 
+        userId: updatedUser.id,
+        correlationId 
+      });
+
       res.json({
         success: true,
         message: 'Email verified successfully',
@@ -334,6 +398,10 @@ router.post('/verify-email', [
       client.release();
     }
   } catch (error) {
+    logger.error('Email verification failed', { 
+      error: error.message, 
+      correlationId 
+    });
     next(error);
   }
 });
@@ -368,6 +436,8 @@ router.post('/resend-verification', [
     .normalizeEmail()
     .withMessage('Valid email is required')
 ], async (req, res, next) => {
+  const correlationId = generateCorrelationId();
+  
   try {
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
@@ -375,6 +445,11 @@ router.post('/resend-verification', [
     }
 
     const { email } = req.body;
+
+    logger.info('Resend verification attempt', { 
+      email: email?.substring(0, 10) + '...',
+      correlationId 
+    });
 
     // Find user
     const user = await User.findByEmail(email);
@@ -392,120 +467,4 @@ router.post('/resend-verification', [
 
     const client = await pool.connect();
     try {
-      // Invalidate existing tokens
-      await client.query(`
-        UPDATE email_verification_tokens
-        SET is_used = true, used_at = NOW()
-        WHERE user_id = $1 AND is_used = false
-      `, [user.id]);
-
-      // Create new token
-      await client.query(`
-        INSERT INTO email_verification_tokens (token_hash, user_id, email, expires_at)
-        VALUES ($1, $2, $3, $4)
-      `, [
-        verificationTokenHash,
-        user.id,
-        user.email,
-        new Date(Date.now() + 24 * 60 * 60 * 1000) // 24 hours
-      ]);
-    } finally {
-      client.release();
-    }
-
-    // Send verification email
-    await emailService.sendEmailVerification(user.email, verificationToken);
-
-    res.json({
-      success: true,
-      message: 'Verification email sent successfully'
-    });
-  } catch (error) {
-    next(error);
-  }
-});
-
-/**
- * @swagger
- * /auth/forgot-password:
- *   post:
- *     summary: Request password reset
- *     tags: [Auth]
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             type: object
- *             required:
- *               - email
- *             properties:
- *               email:
- *                 type: string
- *                 format: email
- *     responses:
- *       200:
- *         description: Password reset email sent
- *       404:
- *         $ref: '#/components/responses/NotFoundError'
- */
-router.post('/forgot-password', [
-  body('email')
-    .isEmail()
-    .normalizeEmail()
-    .withMessage('Valid email is required')
-], async (req, res, next) => {
-  try {
-    const errors = validationResult(req);
-    if (!errors.isEmpty()) {
-      throw new ValidationError('Validation failed', errors.array());
-    }
-
-    const { email } = req.body;
-
-    // Find user
-    const user = await User.findByEmail(email);
-    if (!user) {
-      throw new NotFoundError('User not found');
-    }
-
-    // Generate password reset token
-    const resetToken = generateSecureToken();
-    const resetTokenHash = hashToken(resetToken);
-
-    const client = await pool.connect();
-    try {
-      // Invalidate existing tokens
-      await client.query(`
-        UPDATE password_reset_tokens
-        SET is_used = true, used_at = NOW()
-        WHERE user_id = $1 AND is_used = false
-      `, [user.id]);
-
-      // Create new token
-      await client.query(`
-        INSERT INTO password_reset_tokens (token_hash, user_id, email, expires_at)
-        VALUES ($1, $2, $3, $4)
-      `, [
-        resetTokenHash,
-        user.id,
-        user.email,
-        new Date(Date.now() + 60 * 60 * 1000) // 1 hour
-      ]);
-    } finally {
-      client.release();
-    }
-
-    // Send password reset email
-    await emailService.sendPasswordReset(user.email, resetToken);
-
-    res.json({
-      success: true,
-      message: 'Password reset email sent successfully'
-    });
-  } catch (error) {
-    next(error);
-  }
-});
-
-module.exports = router;
+      // Invalidate existing
