@@ -62,7 +62,9 @@ class RateLimitConfig {
       }
     };
   }
-
+        // Rate limiting is scoped per IP address only — do NOT include User-Agent
+        // or other attacker-controlled headers, as rotating them trivially bypasses limits
+        return req.ip;
   /**
    * Get configuration for general endpoints
    */
