@@ -35,7 +35,14 @@ router.get('/profile', auth, async (req, res, next) => {
   try {
     const { user } = req;
 
-    res.json({
+    const userId = req.user.id;
+
+    // Get user profile from database (req.user only contains JWT payload, not full profile)
+    const user = await User.getProfile(userId);
+
+    if (!user) {
+      throw new NotFoundError('User not found');
+    }
       success: true,
       message: 'User profile retrieved successfully',
       data: {
