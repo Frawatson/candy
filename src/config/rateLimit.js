@@ -81,7 +81,7 @@ class RateLimitConfig {
       legacyHeaders: false,
       skipSuccessfulRequests: true,
       skipFailedRequests: false,
-      keyGenerator: (req) => {
+      skipSuccessfulRequests: false,
         return req.ip;
       }
     };
