@@ -9,6 +9,7 @@ const { generateTokens, generateSecureToken, hashToken } = require('../utils/tok
 const PasswordUtils = require('../utils/passwordUtils');
 const emailService = require('../services/emailService');
 const pool = require('../database/pool');
+const { authRateLimit } = require('../middleware/rateLimiter');
 
 const { 
   ValidationError, 
@@ -16,6 +17,9 @@ const {
   NotFoundError,
   ConflictError 
 } = require('../utils/errorTypes');
+
+// Apply rate limiting to all auth routes
+router.use(authRateLimit);
 
 /**
  * @swagger
@@ -444,3 +448,64 @@ router.post('/resend-verification', [
  *         description: Password reset email sent
  *       404:
  *         $ref: '#/components/responses/NotFoundError'
+ */
+router.post('/forgot-password', [
+  body('email')
+    .isEmail()
+    .normalizeEmail()
+    .withMessage('Valid email is required')
+], async (req, res, next) => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      throw new ValidationError('Validation failed', errors.array());
+    }
+
+    const { email } = req.body;
+
+    // Find user
+    const user = await User.findByEmail(email);
+    if (!user) {
+      throw new NotFoundError('User not found');
+    }
+
+    // Generate password reset token
+    const resetToken = generateSecureToken();
+    const resetTokenHash = hashToken(resetToken);
+
+    const client = await pool.connect();
+    try {
+      // Invalidate existing tokens
+      await client.query(`
+        UPDATE password_reset_tokens
+        SET is_used = true, used_at = NOW()
+        WHERE user_id = $1 AND is_used = false
+      `, [user.id]);
+
+      // Create new token
+      await client.query(`
+        INSERT INTO password_reset_tokens (token_hash, user_id, email, expires_at)
+        VALUES ($1, $2, $3, $4)
+      `, [
+        resetTokenHash,
+        user.id,
+        user.email,
+        new Date(Date.now() + 60 * 60 * 1000) // 1 hour
+      ]);
+    } finally {
+      client.release();
+    }
+
+    // Send password reset email
+    await emailService.sendPasswordReset(user.email, resetToken);
+
+    res.json({
+      success: true,
+      message: 'Password reset email sent successfully'
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+module.exports = router;

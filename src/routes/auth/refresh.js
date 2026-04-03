@@ -1,17 +1,20 @@
 const express = require('express');
 const router = express.Router();
-const { body, validationResult } = require('express-validator');
+const crypto = require('crypto');
 
 const RefreshToken = require('../../models/RefreshToken');
-const User = require('../../models/User');
-const { generateTokens, hashToken } = require('../../utils/tokenUtils');
+const { generateTokens, generateSecureToken, hashToken } = require('../../utils/tokenUtils');
 const refreshTokenAuth = require('../../middleware/refreshTokenAuth');
+const { authRateLimit } = require('../../middleware/rateLimiter');
 
 const { 
-  ValidationError, 
   UnauthorizedError, 
-  NotFoundError 
+  NotFoundError,
+  ValidationError 
 } = require('../../utils/errorTypes');
+
+// Apply rate limiting to all refresh token routes
+router.use(authRateLimit);
 
 /**
  * @swagger
@@ -19,82 +22,52 @@ const {
  *   post:
  *     summary: Refresh access token
  *     tags: [Auth]
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             $ref: '#/components/schemas/RefreshTokenRequest'
+ *     security:
+ *       - refreshToken: []
  *     responses:
  *       200:
  *         description: Token refreshed successfully
  *         content:
  *           application/json:
  *             schema:
- *               $ref: '#/components/schemas/RefreshTokenResponse'
+ *               $ref: '#/components/schemas/RefreshResponse'
  *       401:
  *         $ref: '#/components/responses/UnauthorizedError'
  */
-router.post('/', [
-  body('refreshToken')
-    .notEmpty()
-    .withMessage('Refresh token is required')
-], async (req, res, next) => {
+router.post('/', refreshTokenAuth, async (req, res, next) => {
   try {
-    const errors = validationResult(req);
-    if (!errors.isEmpty()) {
-      throw new ValidationError('Validation failed', errors.array());
-    }
+    const { user, refreshTokenData } = req;
 
-    const { refreshToken } = req.body;
-    const tokenHash = hashToken(refreshToken);
-
-    // Find and validate refresh token
-    const tokenData = await RefreshToken.findByTokenHash(tokenHash);
-    
-    if (!tokenData) {
-      throw new UnauthorizedError('Invalid refresh token');
-    }
-
-    if (tokenData.is_revoked) {
-      throw new UnauthorizedError('Refresh token has been revoked');
-    }
-
-    if (new Date() > tokenData.expires_at) {
-      throw new UnauthorizedError('Refresh token has expired');
-    }
-
-    // Get user data
-    const user = await User.findById(tokenData.user_id);
-    if (!user) {
-      throw new NotFoundError('User not found');
-    }
-
-    // Generate new tokens (token rotation)
+    // Generate new tokens
     const { accessToken, refreshToken: newRefreshToken } = generateTokens({
       sub: user.id,
       email: user.email,
       isEmailVerified: user.is_email_verified
     });
 
-    // Revoke old refresh token
-    await RefreshToken.revokeToken(tokenData.id);
-
-    // Store new refresh token
-    const deviceId = req.headers['x-device-id'] || tokenData.device_id;
-    await RefreshToken.create({
-      tokenHash: hashToken(newRefreshToken),
-      userId: user.id,
-      deviceId,
-      deviceName: req.headers['x-device-name'] || tokenData.device_name,
-      ipAddress: req.ip,
-      userAgent: req.headers['user-agent']
-    });
+    // Update refresh token in database
+    const deviceId = req.headers['x-device-id'] || refreshTokenData.device_id;
+    await RefreshToken.updateToken(
+      refreshTokenData.id,
+      hashToken(newRefreshToken),
+      {
+        deviceId,
+        deviceName: req.headers['x-device-name'] || refreshTokenData.device_name,
+        ipAddress: req.ip,
+        userAgent: req.headers['user-agent']
+      }
+    );
 
     res.json({
       success: true,
       message: 'Token refreshed successfully',
       data: {
+        user: {
+          id: user.id,
+          email: user.email,
+          username: user.username,
+          isEmailVerified: user.is_email_verified
+        },
         accessToken,
         refreshToken: newRefreshToken,
         tokenType: 'Bearer'
@@ -112,44 +85,19 @@ router.post('/', [
  *     summary: Logout from current device
  *     tags: [Auth]
  *     security:
- *       - RefreshTokenAuth: []
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             type: object
- *             required:
- *               - refreshToken
- *             properties:
- *               refreshToken:
- *                 type: string
+ *       - refreshToken: []
  *     responses:
  *       200:
  *         description: Logged out successfully
  *       401:
  *         $ref: '#/components/responses/UnauthorizedError'
  */
-router.post('/logout', [
-  body('refreshToken')
-    .notEmpty()
-    .withMessage('Refresh token is required')
-], async (req, res, next) => {
+router.post('/logout', refreshTokenAuth, async (req, res, next) => {
   try {
-    const errors = validationResult(req);
-    if (!errors.isEmpty()) {
-      throw new ValidationError('Validation failed', errors.array());
-    }
+    const { refreshTokenData } = req;
 
-    const { refreshToken } = req.body;
-    const tokenHash = hashToken(refreshToken);
-
-    // Find and revoke refresh token
-    const tokenData = await RefreshToken.findByTokenHash(tokenHash);
-    
-    if (tokenData && !tokenData.is_revoked) {
-      await RefreshToken.revokeToken(tokenData.id);
-    }
+    // Revoke the current refresh token
+    await RefreshToken.revokeToken(refreshTokenData.id);
 
     res.json({
       success: true,
@@ -167,47 +115,19 @@ router.post('/logout', [
  *     summary: Logout from all devices
  *     tags: [Auth]
  *     security:
- *       - RefreshTokenAuth: []
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             type: object
- *             required:
- *               - refreshToken
- *             properties:
- *               refreshToken:
- *                 type: string
+ *       - refreshToken: []
  *     responses:
  *       200:
  *         description: Logged out from all devices successfully
  *       401:
  *         $ref: '#/components/responses/UnauthorizedError'
  */
-router.post('/logout-all', [
-  body('refreshToken')
-    .notEmpty()
-    .withMessage('Refresh token is required')
-], async (req, res, next) => {
+router.post('/logout-all', refreshTokenAuth, async (req, res, next) => {
   try {
-    const errors = validationResult(req);
-    if (!errors.isEmpty()) {
-      throw new ValidationError('Validation failed', errors.array());
-    }
+    const { user } = req;
 
-    const { refreshToken } = req.body;
-    const tokenHash = hashToken(refreshToken);
-
-    // Find token to get user ID
-    const tokenData = await RefreshToken.findByTokenHash(tokenHash);
-    
-    if (!tokenData) {
-      throw new UnauthorizedError('Invalid refresh token');
-    }
-
-    // Revoke all refresh tokens for this user
-    await RefreshToken.revokeAllByUserId(tokenData.user_id);
+    // Revoke all refresh tokens for the user
+    await RefreshToken.revokeAllForUser(user.id);
 
     res.json({
       success: true,
@@ -222,47 +142,29 @@ router.post('/logout-all', [
  * @swagger
  * /auth/refresh/tokens:
  *   get:
- *     summary: Get active refresh tokens for user
+ *     summary: Get all active tokens for current user
  *     tags: [Auth]
  *     security:
- *       - RefreshTokenAuth: []
- *     parameters:
- *       - in: header
- *         name: Authorization
- *         required: true
- *         schema:
- *           type: string
- *           example: "Bearer your-refresh-token-here"
+ *       - refreshToken: []
  *     responses:
  *       200:
  *         description: Active tokens retrieved successfully
  *         content:
  *           application/json:
  *             schema:
- *               $ref: '#/components/schemas/ActiveTokensResponse'
+ *               $ref: '#/components/schemas/TokensResponse'
  *       401:
  *         $ref: '#/components/responses/UnauthorizedError'
  */
 router.get('/tokens', refreshTokenAuth, async (req, res, next) => {
   try {
-    const userId = req.user.id;
+    const { user } = req;
 
-    // Get active tokens for user
-    const activeTokens = await RefreshToken.getActiveTokensByUserId(userId);
+    // Get all active tokens for the user
+    const tokens = await RefreshToken.getActiveTokensForUser(user.id);
 
-    // Extract current token from authorization header safely
-    const authHeader = req.headers.authorization;
-    let currentTokenHash = null;
-    
-    if (authHeader && authHeader.startsWith('Bearer ')) {
-      const currentToken = authHeader.substring(7);
-      if (currentToken) {
-        currentTokenHash = hashToken(currentToken);
-      }
-    }
-
-    // Format tokens for response (remove sensitive data)
-    const formattedTokens = activeTokens.map(token => ({
+    // Map to safe format (without sensitive data)
+    const safeTokens = tokens.map(token => ({
       id: token.id,
       deviceId: token.device_id,
       deviceName: token.device_name,
@@ -270,16 +172,14 @@ router.get('/tokens', refreshTokenAuth, async (req, res, next) => {
       userAgent: token.user_agent,
       createdAt: token.created_at,
       lastUsedAt: token.last_used_at,
-      expiresAt: token.expires_at,
-      isCurrent: currentTokenHash ? token.token_hash === currentTokenHash : false
+      isCurrent: token.id === req.refreshTokenData.id
     }));
 
     res.json({
       success: true,
       message: 'Active tokens retrieved successfully',
       data: {
-        tokens: formattedTokens,
-        total: formattedTokens.length
+        tokens: safeTokens
       }
     });
   } catch (error) {
@@ -291,10 +191,10 @@ router.get('/tokens', refreshTokenAuth, async (req, res, next) => {
  * @swagger
  * /auth/refresh/revoke:
  *   post:
- *     summary: Revoke specific refresh token
+ *     summary: Revoke a specific token
  *     tags: [Auth]
  *     security:
- *       - RefreshTokenAuth: []
+ *       - refreshToken: []
  *     requestBody:
  *       required: true
  *       content:
@@ -305,47 +205,37 @@ router.get('/tokens', refreshTokenAuth, async (req, res, next) => {
  *               - tokenId
  *             properties:
  *               tokenId:
- *                 type: integer
+ *                 type: string
+ *                 format: uuid
  *                 description: ID of the token to revoke
  *     responses:
  *       200:
  *         description: Token revoked successfully
- *       404:
- *         $ref: '#/components/responses/NotFoundError'
  *       401:
  *         $ref: '#/components/responses/UnauthorizedError'
+ *       404:
+ *         $ref: '#/components/responses/NotFoundError'
  */
-router.post('/revoke', [
-  refreshTokenAuth,
-  body('tokenId')
-    .isInt({ min: 1 })
-    .withMessage('Valid token ID is required')
-], async (req, res, next) => {
+router.post('/revoke', refreshTokenAuth, async (req, res, next) => {
   try {
-    const errors = validationResult(req);
-    if (!errors.isEmpty()) {
-      throw new ValidationError('Validation failed', errors.array());
+    const { user } = req;
+    const { tokenId } = req.body;
+
+    if (!tokenId) {
+      throw new ValidationError('Token ID is required');
     }
 
-    const { tokenId } = req.body;
-    const userId = req.user.id;
-
-    // Find token and verify ownership
+    // Verify the token belongs to the current user
     const token = await RefreshToken.findById(tokenId);
-    
     if (!token) {
       throw new NotFoundError('Token not found');
     }
 
-    if (token.user_id !== userId) {
-      throw new UnauthorizedError('You can only revoke your own tokens');
+    if (token.user_id !== user.id) {
+      throw new UnauthorizedError('Not authorized to revoke this token');
     }
 
-    if (token.is_revoked) {
-      throw new ValidationError('Token is already revoked');
-    }
-
-    // Revoke token
+    // Revoke the token
     await RefreshToken.revokeToken(tokenId);
 
     res.json({
