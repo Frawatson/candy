@@ -89,11 +89,33 @@ router.put('/users/:id/role', auth, async (req, res, next) => {
     const { role } = req.body;
     const userId = req.params.id;
 
+    // Allowlist of valid roles — prevents privilege escalation via arbitrary role values
+    const VALID_ROLES = ['user', 'admin', 'moderator'];
+    if (!role || !VALID_ROLES.includes(role)) {
+      return res.status(400).json({
+        success: false,
+        message: `Invalid role. Must be one of: ${VALID_ROLES.join(', ')}`
+      });
+    }
+
     const result = await pool.query(
       'UPDATE users SET role = $1, updated_at = NOW() WHERE id = $2 RETURNING *',
       [role, userId]
     );
 
+    if (result.rows.length === 0) {
+      return res.status(404).json({ success: false, message: 'User not found' });
+    }
+
+    res.json({
+      success: true,
+      message: `Updated user ${userId} role to ${role}`,
+      data: { user: result.rows[0] }
+    });
+  } catch (error) {
+    next(error);
+  }
+});
     if (result.rows.length === 0) {
       return res.status(404).json({ success: false, message: 'User not found' });
     }
