@@ -99,7 +99,7 @@ router.put('/users/:id/role', auth, async (req, res, next) => {
     }
 
     const result = await pool.query(
-      'UPDATE users SET role = $1, updated_at = NOW() WHERE id = $2 RETURNING *',
+      'UPDATE users SET role = $1, updated_at = NOW() WHERE id = $2 RETURNING id, email, username, role, is_email_verified, created_at, updated_at',
       [role, userId]
     );
 
@@ -107,11 +107,18 @@ router.put('/users/:id/role', auth, async (req, res, next) => {
       return res.status(404).json({ success: false, message: 'User not found' });
     }
 
+    // Return only safe fields — never expose password hash or other sensitive columns
+    const { password, ...safeUser } = result.rows[0];
+
     res.json({
       success: true,
       message: `Updated user ${userId} role to ${role}`,
-      data: { user: result.rows[0] }
+      data: { user: safeUser }
     });
+  } catch (error) {
+    next(error);
+  }
+});
   } catch (error) {
     next(error);
   }
