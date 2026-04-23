@@ -71,6 +71,25 @@ router.post('/users/bulk-delete', auth, requireAdmin, async (req, res, next) => 
       });
     }
 
+    // Cap array size to prevent memory pressure and oversized DELETE queries (DoS)
+    const MAX_BULK_DELETE = 1000;
+    if (userIds.length > MAX_BULK_DELETE) {
+      return res.status(400).json({
+        success: false,
+        message: `userIds must contain at most ${MAX_BULK_DELETE} entries`
+      });
+    }
+
+    // Validate every element is a safe integer — rejects strings, nulls, floats, NaN.
+    // Prevents Postgres from throwing a cast error on ANY($1::int[]) that could
+    // leak a stack trace through the error handler.
+    if (!userIds.every(id => Number.isInteger(id) && id > 0)) {
+      return res.status(400).json({
+        success: false,
+        message: 'All entries in userIds must be positive integers'
+      });
+    }
+
     // Single atomic DELETE using ANY($1) — eliminates N round-trips and ensures
     // all-or-nothing semantics; a failure rolls back cleanly with no partial deletes.
     const client = await pool.connect();
