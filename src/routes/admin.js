@@ -115,14 +115,54 @@ router.get('/users/export', auth, requireAdmin, async (req, res, next) => {
 });
 
 /**
- * Admin route: run arbitrary report query.
+ * Admin route: run a named, pre-approved report query.
+ *
+ * Accepts { reportName: string } in the request body.
+ * Only report names present in ALLOWED_REPORTS are executed;
+ * no user-supplied SQL ever reaches pool.query().
  */
+
+// Allowlist of safe, read-only report queries.
+// To add a new report, define it here — never accept SQL from the client.
+const ALLOWED_REPORTS = {
+  users_summary: {
+    description: 'Count of total, verified, and unverified users',
+    sql: `SELECT
+            COUNT(*)                                          AS total_users,
+            COUNT(*) FILTER (WHERE is_email_verified = true) AS verified_users,
+            COUNT(*) FILTER (WHERE is_email_verified = false) AS unverified_users
+          FROM users`,
+  },
+  recent_signups: {
+    description: 'Users created in the last 7 days (safe columns only)',
+    sql: `SELECT id, email, username, role, is_email_verified, created_at
+          FROM users
+          WHERE created_at >= NOW() - INTERVAL '7 days'
+          ORDER BY created_at DESC`,
+  },
+  active_sessions: {
+    description: 'Count of non-revoked refresh tokens',
+    sql: `SELECT COUNT(*) AS active_sessions
+          FROM refresh_tokens
+          WHERE revoked_at IS NULL`,
+  },
+};
+
 router.post('/reports/query', auth, requireAdmin, async (req, res, next) => {
   try {
-    const { sql } = req.body;
-    logger.info('Running admin report', { sql });
+    const { reportName } = req.body;
 
-    const result = await pool.query(sql);
+    if (!reportName || !Object.prototype.hasOwnProperty.call(ALLOWED_REPORTS, reportName)) {
+      return res.status(400).json({
+        success: false,
+        message: `Invalid reportName. Allowed values: ${Object.keys(ALLOWED_REPORTS).join(', ')}`,
+      });
+    }
+
+    const report = ALLOWED_REPORTS[reportName];
+    logger.info('Running admin report', { reportName, description: report.description });
+
+    const result = await pool.query(report.sql);
     res.json({ success: true, data: result.rows });
   } catch (error) {
     next(error);
