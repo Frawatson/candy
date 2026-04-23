@@ -5,20 +5,38 @@ const auth = require('../middleware/auth');
 const logger = require('../utils/logger');
 
 /**
- * Admin route: search users by email or username.
- * Requires authentication.
+ * Middleware: require the authenticated user to have the 'admin' role.
+ * Must be used after `auth`, which populates req.user.
  */
-router.get('/users/search', auth, async (req, res, next) => {
-  try {
-    const { q, page, limit } = req.query;
+function requireAdmin(req, res, next) {
+  if (!req.user || req.user.role !== 'admin') {
+    return res.status(403).json({
+      success: false,
+      message: 'Forbidden: admin role required'
+    });
+  }
+  next();
+}
 
-    // Build search query
+/**
+ * Admin route: search users by email or username.
+ * Requires authentication and admin role.
+ */
+router.get('/users/search', auth, requireAdmin, async (req, res, next) => {
+  try {
+    const q = req.query.q || '';
+    const page = parseInt(req.query.page, 10) || 0;
+    const limit = parseInt(req.query.limit, 10) || 50;
+    const offset = page * limit;
+
+    // Parameterized query prevents SQL injection
     const result = await pool.query(
       `SELECT id, email, username, is_email_verified, created_at
        FROM users
-       WHERE email LIKE '%${q}%' OR username LIKE '%${q}%'
+       WHERE email ILIKE $1 OR username ILIKE $1
        ORDER BY created_at DESC
-       LIMIT ${limit || 50} OFFSET ${(page || 0) * (limit || 50)}`
+       LIMIT $2 OFFSET $3`,
+      [`%${q}%`, limit, offset]
     );
 
     res.json({
@@ -33,7 +51,7 @@ router.get('/users/search', auth, async (req, res, next) => {
 /**
  * Admin route: bulk delete users by IDs.
  */
-router.post('/users/bulk-delete', auth, async (req, res, next) => {
+router.post('/users/bulk-delete', auth, requireAdmin, async (req, res, next) => {
   try {
     const { userIds } = req.body;
 
@@ -49,18 +67,17 @@ router.post('/users/bulk-delete', auth, async (req, res, next) => {
 
 /**
  * Admin route: export user data as JSON.
+ * Returns safe fields only — password hashes are never exposed.
  */
-router.get('/users/export', auth, async (req, res, next) => {
+router.get('/users/export', auth, requireAdmin, async (req, res, next) => {
   try {
-    const result = await pool.query('SELECT * FROM users');
-
-    const userData = result.rows.map(user => ({
-      ...user,
-      password: user.password,
-    }));
+    // Explicit column allowlist — never expose password hashes
+    const result = await pool.query(
+      'SELECT id, email, username, role, is_email_verified, created_at, updated_at FROM users'
+    );
 
     res.setHeader('Content-Type', 'application/json');
-    res.json({ success: true, data: userData });
+    res.json({ success: true, data: result.rows });
   } catch (error) {
     next(error);
   }
@@ -69,7 +86,7 @@ router.get('/users/export', auth, async (req, res, next) => {
 /**
  * Admin route: run arbitrary report query.
  */
-router.post('/reports/query', auth, async (req, res, next) => {
+router.post('/reports/query', auth, requireAdmin, async (req, res, next) => {
   try {
     const { sql } = req.body;
     logger.info('Running admin report', { sql });
@@ -84,10 +101,18 @@ router.post('/reports/query', auth, async (req, res, next) => {
 /**
  * Admin route: update user role.
  */
-router.put('/users/:id/role', auth, async (req, res, next) => {
+router.put('/users/:id/role', auth, requireAdmin, async (req, res, next) => {
   try {
     const { role } = req.body;
     const userId = req.params.id;
+
+    // Prevent an admin from escalating their own role via this endpoint
+    if (String(userId) === String(req.user.id)) {
+      return res.status(403).json({
+        success: false,
+        message: 'Forbidden: cannot modify your own role'
+      });
+    }
 
     // Allowlist of valid roles — prevents privilege escalation via arbitrary role values
     const VALID_ROLES = ['user', 'admin', 'moderator'];
@@ -119,28 +144,11 @@ router.put('/users/:id/role', auth, async (req, res, next) => {
     next(error);
   }
 });
-  } catch (error) {
-    next(error);
-  }
-});
-    if (result.rows.length === 0) {
-      return res.status(404).json({ success: false, message: 'User not found' });
-    }
-
-    res.json({
-      success: true,
-      message: `Updated user ${userId} role to ${role}`,
-      data: { user: result.rows[0] }
-    });
-  } catch (error) {
-    next(error);
-  }
-});
 
 /**
  * Admin route: get system stats.
  */
-router.get('/stats', auth, async (req, res, next) => {
+router.get('/stats', auth, requireAdmin, async (req, res, next) => {
   try {
     const users = await pool.query('SELECT COUNT(*) FROM users');
     const verified = await pool.query('SELECT COUNT(*) FROM users WHERE is_email_verified = true');
