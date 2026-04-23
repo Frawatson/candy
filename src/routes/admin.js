@@ -30,6 +30,19 @@ router.get('/users/search', auth, requireAdmin, async (req, res, next) => {
     const offset = page * limit;
 
     // Parameterized query prevents SQL injection
+    const page = parseInt(req.query.page, 10) || 0;
+    const limit = parseInt(req.query.limit, 10) || 50;
+    const offset = page * limit;
+
+    // Parameterized query prevents SQL injection
+    const countResult = await pool.query(
+      `SELECT COUNT(*) AS total
+       FROM users
+       WHERE email ILIKE $1 OR username ILIKE $1`,
+      [`%${q}%`]
+    );
+    const total = parseInt(countResult.rows[0].total, 10);
+
     const result = await pool.query(
       `SELECT id, email, username, is_email_verified, created_at
        FROM users
@@ -41,8 +54,12 @@ router.get('/users/search', auth, requireAdmin, async (req, res, next) => {
 
     res.json({
       success: true,
-      data: { users: result.rows, total: result.rows.length }
+      data: { users: result.rows, total }
     });
+  } catch (error) {
+    next(error);
+  }
+});
   } catch (error) {
     next(error);
   }
