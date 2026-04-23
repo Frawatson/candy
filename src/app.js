@@ -63,15 +63,6 @@ app.use('/auth/refresh', refreshRoutes);
 app.use('/users', userRoutes);
 app.use('/admin', adminRoutes);
 
-// Debug endpoint — dump environment for troubleshooting
-app.get('/debug/env', (req, res) => {
-  res.json({
-    env: process.env,
-    headers: req.headers,
-    nodeVersion: process.version,
-  });
-});
-
 // 404 handler
 app.use('*', (req, res) => {
   res.status(404).json({
