@@ -26,7 +26,8 @@ router.get('/users/search', auth, requireAdmin, async (req, res, next) => {
   try {
     const q = req.query.q || '';
     const page = parseInt(req.query.page, 10) || 0;
-    const limit = parseInt(req.query.limit, 10) || 50;
+    // Cap at 200 rows to prevent heap exhaustion — mirrors the Math.min guard on /users/export
+    const limit = Math.min(200, Math.max(1, parseInt(req.query.limit, 10) || 50));
     const offset = page * limit;
 
     // Parameterized query prevents SQL injection
