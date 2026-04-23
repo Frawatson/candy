@@ -59,18 +59,38 @@ router.get('/users/search', auth, requireAdmin, async (req, res, next) => {
 /**
  * Admin route: bulk delete users by IDs.
  */
-/**
- * Admin route: bulk delete users by IDs.
- */
 router.post('/users/bulk-delete', auth, requireAdmin, async (req, res, next) => {
   try {
     const { userIds } = req.body;
 
-    for (const id of userIds) {
-      await pool.query('DELETE FROM users WHERE id = $1', [id]);
+    // Validate input before touching the DB — prevents TypeError and runaway queries
+    if (!Array.isArray(userIds) || userIds.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'userIds must be a non-empty array'
+      });
     }
 
-    res.json({ success: true, message: `Deleted ${userIds.length} users` });
+    // Single atomic DELETE using ANY($1) — eliminates N round-trips and ensures
+    // all-or-nothing semantics; a failure rolls back cleanly with no partial deletes.
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const result = await client.query(
+        'DELETE FROM users WHERE id = ANY($1::int[])',
+        [userIds]
+      );
+      await client.query('COMMIT');
+      res.json({
+        success: true,
+        message: `Deleted ${result.rowCount} users`
+      });
+    } catch (dbError) {
+      await client.query('ROLLBACK');
+      throw dbError;
+    } finally {
+      client.release();
+    }
   } catch (error) {
     next(error);
   }
