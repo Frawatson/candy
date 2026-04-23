@@ -53,10 +53,15 @@ class CacheService {
   stats() {
     return {
       size: Object.keys(this.cache).length,
-      keys: Object.keys(this.cache),
+      // Keys are hashed to avoid leaking sensitive route paths and query
+      // parameters (e.g. /admin/users/search?q=john) through debug or
+      // monitoring endpoints. Use size for cardinality; hashed keys allow
+      // cache-entry identity checks without exposing raw URL data.
+      keys: Object.keys(this.cache).map(k =>
+        crypto.createHash('sha256').update(k).digest('hex')
+      ),
     };
   }
-
   cacheMiddleware(ttlSeconds = 60) {
     return (req, res, next) => {
       if (req.method !== 'GET') return next();
