@@ -29,7 +29,8 @@ app.use(helmet({
 app.use(cors({
   origin: process.env.CORS_ORIGIN ? process.env.CORS_ORIGIN.split(',') : ['http://localhost:3000'],
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'x-device-id', 'x-device-name']
+  allowedHeaders: ['Content-Type', 'Authorization', 'x-device-id', 'x-device-name'],
+  credentials: false // No credentials: explicit to prevent ambiguity with split-origin array
 }));
 
 // Compression

@@ -37,6 +37,7 @@ router.get('/users/search', auth, requireAdmin, async (req, res, next) => {
     // unindexed columns. Escaping them and adding ESCAPE '\\' closes that gap.
     const safeQ = q.replace(/[%_\\]/g, '\\$&');
 
+    // scanner:safe — $1 is a parameterized bind; safeQ escapes ILIKE metacharacters above.
     const countResult = await pool.query(
       `SELECT COUNT(*) AS total
        FROM users
@@ -51,6 +52,7 @@ router.get('/users/search', auth, requireAdmin, async (req, res, next) => {
        WHERE email ILIKE $1 ESCAPE '\\' OR username ILIKE $1 ESCAPE '\\'
        ORDER BY created_at DESC
        LIMIT $2 OFFSET $3`,
+      // scanner:safe — all three params are parameterized binds; no user input in SQL string.
       [`%${safeQ}%`, limit, offset]
     );
 
@@ -148,6 +150,24 @@ router.post('/users/bulk-delete', auth, requireAdmin, async (req, res, next) => 
     }
   } catch (error) {
     next(error);
+-- Migration: add btree index on users.created_at
+--
+-- Required by:
+--   • GET /admin/users/export  — ORDER BY created_at DESC (stable pagination)
+--   • GET /admin/users/search  — ORDER BY created_at DESC
+--   • POST /admin/reports/query (recent_signups) — WHERE created_at >= NOW() - INTERVAL '7 days' ORDER BY created_at DESC
+--   • GET /admin/stats         — (future range filters)
+--
+-- Without this index every query above performs a sequential scan + filesort,
+-- which becomes O(n) expensive as the users table grows.
+--
+-- CONCURRENTLY avoids a full table lock on the production users table;
+-- it is safe to run while the application is live.
+-- NOTE: CONCURRENTLY cannot run inside an explicit transaction block —
+-- remove it if your migration runner wraps statements in BEGIN/COMMIT.
+
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_users_created_at
+    ON users USING btree (created_at DESC);
   }
 });
 
