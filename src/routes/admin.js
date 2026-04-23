@@ -91,6 +91,17 @@ router.post('/users/bulk-delete', auth, requireAdmin, async (req, res, next) => 
       });
     }
 
+    // Prevent an admin from deleting their own account via bulk-delete —
+    // mirrors the self-modification guard on PUT /users/:id/role (line 219).
+    // Deleting the requesting admin's own account would invalidate their session
+    // and could leave the system with no admin users.
+    if (userIds.some(id => String(id) === String(req.user.id))) {
+      return res.status(403).json({
+        success: false,
+        message: 'Forbidden: cannot delete your own account'
+      });
+    }
+
     // Single atomic DELETE using ANY($1) — eliminates N round-trips and ensures
     // all-or-nothing semantics; a failure rolls back cleanly with no partial deletes.
     const client = await pool.connect();
