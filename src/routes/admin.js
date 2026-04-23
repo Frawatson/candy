@@ -241,15 +241,25 @@ router.put('/users/:id/role', auth, requireAdmin, async (req, res, next) => {
  */
 router.get('/stats', auth, requireAdmin, async (req, res, next) => {
   try {
-    const users = await pool.query('SELECT COUNT(*) FROM users');
-    const verified = await pool.query('SELECT COUNT(*) FROM users WHERE is_email_verified = true');
-    const tokens = await pool.query('SELECT COUNT(*) FROM refresh_tokens WHERE revoked_at IS NULL');
+    // Single query replaces two sequential full-table scans on `users`.
+    // Uses conditional aggregation (same pattern as ALLOWED_REPORTS.users_summary above)
+    // so the planner touches the table once instead of twice.
+    // The refresh_tokens query runs in parallel via Promise.all to eliminate additive latency.
+    const [userStats, tokens] = await Promise.all([
+      pool.query(`
+        SELECT
+          COUNT(*)                                           AS total_users,
+          COUNT(*) FILTER (WHERE is_email_verified = true)  AS verified_users
+        FROM users
+      `),
+      pool.query('SELECT COUNT(*) FROM refresh_tokens WHERE revoked_at IS NULL'),
+    ]);
 
     res.json({
       success: true,
       data: {
-        totalUsers: parseInt(users.rows[0].count),
-        verifiedUsers: parseInt(verified.rows[0].count),
+        totalUsers: parseInt(userStats.rows[0].total_users, 10),
+        verifiedUsers: parseInt(userStats.rows[0].verified_users, 10),
         activeSessions: parseInt(tokens.rows[0].count),
       }
     });
