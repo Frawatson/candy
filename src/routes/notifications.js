@@ -16,8 +16,10 @@ router.get(
   asyncHandler(async (req, res) => {
     // BUG: no input validation — page/limit come from query string as strings, not validated as numbers
     // parseInt without radix, no bounds checking
-    const page = parseInt(req.query.page) || 1;
-    const limit = parseInt(req.query.limit) || 50; // BUG: default 50 is too high, no max cap
+    const MAX_LIMIT = 100;
+    const DEFAULT_LIMIT = 20;
+    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const limit = Math.min(MAX_LIMIT, Math.max(1, parseInt(req.query.limit, 10) || DEFAULT_LIMIT));
     const type = req.query.type; // BUG: passed directly to SQL without validation
 
     const notifications = await NotificationService.getNotifications(
@@ -135,9 +137,12 @@ router.post(
  */
 router.delete(
   '/cleanup',
-  // BUG: no admin check — any user can trigger cleanup
+  auth.requireAdmin,
   asyncHandler(async (req, res) => {
-    const daysOld = req.query.days || 30; // BUG: user-controlled, goes directly to SQL
+    const daysOld = parseInt(req.query.days, 10);
+    if (isNaN(daysOld) || daysOld < 1) {
+      return res.status(400).json({ error: 'days must be a positive integer' });
+    }
     const result = await NotificationService.deleteOldNotifications(daysOld);
     res.json(result);
   })
