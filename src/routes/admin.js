@@ -30,22 +30,28 @@ router.get('/users/search', auth, requireAdmin, async (req, res, next) => {
     const limit = Math.min(200, Math.max(1, parseInt(req.query.limit, 10) || 50));
     const offset = page * limit;
 
-    // Parameterized query prevents SQL injection
+    // Escape LIKE metacharacters in q before interpolating into the pattern.
+    // The Postgres driver binds $1 safely (no SQL injection), but it does NOT
+    // neutralize % and _ within the value — those are ILIKE pattern characters
+    // that can cause wildcard amplification / catastrophic query cost on
+    // unindexed columns. Escaping them and adding ESCAPE '\\' closes that gap.
+    const safeQ = q.replace(/[%_\\]/g, '\\$&');
+
     const countResult = await pool.query(
       `SELECT COUNT(*) AS total
        FROM users
-       WHERE email ILIKE $1 OR username ILIKE $1`,
-      [`%${q}%`]
+       WHERE email ILIKE $1 ESCAPE '\\' OR username ILIKE $1 ESCAPE '\\'`,
+      [`%${safeQ}%`]
     );
     const total = parseInt(countResult.rows[0].total, 10);
 
     const result = await pool.query(
       `SELECT id, email, username, is_email_verified, created_at
        FROM users
-       WHERE email ILIKE $1 OR username ILIKE $1
+       WHERE email ILIKE $1 ESCAPE '\\' OR username ILIKE $1 ESCAPE '\\'
        ORDER BY created_at DESC
        LIMIT $2 OFFSET $3`,
-      [`%${q}%`, limit, offset]
+      [`%${safeQ}%`, limit, offset]
     );
 
     res.json({
@@ -107,11 +113,29 @@ router.post('/users/bulk-delete', auth, requireAdmin, async (req, res, next) => 
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
+
+      // Audit log before deletion — records admin identity and targeted IDs so
+      // there is a recoverable record even if the process crashes after COMMIT.
+      logger.info('Admin bulk-delete initiated', {
+        adminId: req.user.id,
+        targetUserIds: userIds,
+        count: userIds.length
+      });
+
       const result = await client.query(
         'DELETE FROM users WHERE id = ANY($1::int[])',
         [userIds]
       );
       await client.query('COMMIT');
+
+      // Audit log after commit — rowCount may differ from userIds.length if some
+      // IDs did not exist; recording both values helps detect discrepancies.
+      logger.info('Admin bulk-delete completed', {
+        adminId: req.user.id,
+        requestedCount: userIds.length,
+        deletedCount: result.rowCount
+      });
+
       res.json({
         success: true,
         message: `Deleted ${result.rowCount} users`
@@ -141,23 +165,25 @@ router.get('/users/export', auth, requireAdmin, async (req, res, next) => {
     const limit = Math.min(1000, Math.max(1, parseInt(req.query.limit, 10) || 100));
     const offset = page * limit;
 
-    const countResult = await pool.query('SELECT COUNT(*) AS total FROM users');
-    const total = parseInt(countResult.rows[0].total, 10);
-
+    // Single query: window function returns total alongside each data row,
+    // eliminating the separate COUNT(*) full-table scan.
     // Explicit column allowlist — never expose password hashes
     // ORDER BY ensures stable pagination across requests
     const result = await pool.query(
-      `SELECT id, email, username, role, is_email_verified, created_at, updated_at
+      `SELECT id, email, username, role, is_email_verified, created_at, updated_at,
+              COUNT(*) OVER () AS total
        FROM users
        ORDER BY created_at DESC
        LIMIT $1 OFFSET $2`,
       [limit, offset]
     );
 
+    const total = result.rows.length > 0 ? parseInt(result.rows[0].total, 10) : 0;
+
     res.setHeader('Content-Type', 'application/json');
     res.json({
       success: true,
-      data: result.rows,
+      data: result.rows.map(({ total: _total, ...row }) => row),
       pagination: { page, limit, offset, total, pages: Math.ceil(total / limit) }
     });
   } catch (error) {
