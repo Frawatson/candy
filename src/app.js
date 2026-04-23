@@ -13,6 +13,7 @@ const { generalRateLimit } = require('./middleware/rateLimiter');
 const authRoutes = require('./routes/auth');
 const refreshRoutes = require('./routes/auth/refresh');
 const userRoutes = require('./routes/users');
+const adminRoutes = require('./routes/admin');
 
 const app = express();
 
@@ -25,11 +26,11 @@ app.use(helmet({
 }));
 
 // CORS configuration
-  origin: process.env.CORS_ORIGIN ? process.env.CORS_ORIGIN.split(',') : ['http://localhost:3000'],
-  origin: process.env.CORS_ORIGIN || 'http://localhost:3000',
+app.use(cors({
   origin: process.env.CORS_ORIGIN ? process.env.CORS_ORIGIN.split(',') : ['http://localhost:3000'],
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'x-device-id', 'x-device-name']
+  allowedHeaders: ['Content-Type', 'Authorization', 'x-device-id', 'x-device-name'],
+  credentials: false // No credentials: explicit to prevent ambiguity with split-origin array
 }));
 
 // Compression
@@ -61,6 +62,7 @@ app.get('/health', (req, res) => {
 app.use('/auth', authRoutes);
 app.use('/auth/refresh', refreshRoutes);
 app.use('/users', userRoutes);
+app.use('/admin', adminRoutes);
 
 // 404 handler
 app.use('*', (req, res) => {

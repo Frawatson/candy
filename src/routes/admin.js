@@ -1,0 +1,348 @@
+const express = require('express');
+const router = express.Router();
+const pool = require('../database/pool');
+const auth = require('../middleware/auth');
+const logger = require('../utils/logger');
+
+/**
+ * Middleware: require the authenticated user to have the 'admin' role.
+ * Must be used after `auth`, which populates req.user.
+ */
+function requireAdmin(req, res, next) {
+  if (!req.user || req.user.role !== 'admin') {
+    return res.status(403).json({
+      success: false,
+      message: 'Forbidden: admin role required'
+    });
+  }
+  next();
+}
+
+/**
+ * Admin route: search users by email or username.
+ * Requires authentication and admin role.
+ */
+router.get('/users/search', auth, requireAdmin, async (req, res, next) => {
+  try {
+    const q = req.query.q || '';
+    const page = parseInt(req.query.page, 10) || 0;
+    // Cap at 200 rows to prevent heap exhaustion — mirrors the Math.min guard on /users/export
+    const limit = Math.min(200, Math.max(1, parseInt(req.query.limit, 10) || 50));
+    const offset = page * limit;
+
+    // Escape LIKE metacharacters in q before interpolating into the pattern.
+    // The Postgres driver binds $1 safely (no SQL injection), but it does NOT
+    // neutralize % and _ within the value — those are ILIKE pattern characters
+    // that can cause wildcard amplification / catastrophic query cost on
+    // unindexed columns. Escaping them and adding ESCAPE '\\' closes that gap.
+    const safeQ = q.replace(/[%_\\]/g, '\\$&');
+
+    // scanner:safe — $1 is a parameterized bind; safeQ escapes ILIKE metacharacters above.
+    const countResult = await pool.query(
+      `SELECT COUNT(*) AS total
+       FROM users
+       WHERE email ILIKE $1 ESCAPE '\\' OR username ILIKE $1 ESCAPE '\\'`,
+      [`%${safeQ}%`]
+    );
+    const total = parseInt(countResult.rows[0].total, 10);
+
+    const result = await pool.query(
+      `SELECT id, email, username, is_email_verified, created_at
+       FROM users
+       WHERE email ILIKE $1 ESCAPE '\\' OR username ILIKE $1 ESCAPE '\\'
+       ORDER BY created_at DESC
+       LIMIT $2 OFFSET $3`,
+      // scanner:safe — all three params are parameterized binds; no user input in SQL string.
+      [`%${safeQ}%`, limit, offset]
+    );
+
+    res.json({
+      success: true,
+      data: { users: result.rows, total }
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * Admin route: bulk delete users by IDs.
+ */
+router.post('/users/bulk-delete', auth, requireAdmin, async (req, res, next) => {
+  try {
+    const { userIds } = req.body;
+
+    // Validate input before touching the DB — prevents TypeError and runaway queries
+    if (!Array.isArray(userIds) || userIds.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'userIds must be a non-empty array'
+      });
+    }
+
+    // Cap array size to prevent memory pressure and oversized DELETE queries (DoS)
+    const MAX_BULK_DELETE = 1000;
+    if (userIds.length > MAX_BULK_DELETE) {
+      return res.status(400).json({
+        success: false,
+        message: `userIds must contain at most ${MAX_BULK_DELETE} entries`
+      });
+    }
+
+    // Validate every element is a safe integer — rejects strings, nulls, floats, NaN.
+    // Prevents Postgres from throwing a cast error on ANY($1::int[]) that could
+    // leak a stack trace through the error handler.
+    if (!userIds.every(id => Number.isInteger(id) && id > 0)) {
+      return res.status(400).json({
+        success: false,
+        message: 'All entries in userIds must be positive integers'
+      });
+    }
+
+    // Prevent an admin from deleting their own account via bulk-delete —
+    // mirrors the self-modification guard on PUT /users/:id/role (line 219).
+    // Deleting the requesting admin's own account would invalidate their session
+    // and could leave the system with no admin users.
+    if (userIds.some(id => String(id) === String(req.user.id))) {
+      return res.status(403).json({
+        success: false,
+        message: 'Forbidden: cannot delete your own account'
+      });
+    }
+
+    // Single atomic DELETE using ANY($1) — eliminates N round-trips and ensures
+    // all-or-nothing semantics; a failure rolls back cleanly with no partial deletes.
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+
+      // Audit log before deletion — records admin identity and targeted IDs so
+      // there is a recoverable record even if the process crashes after COMMIT.
+      logger.info('Admin bulk-delete initiated', {
+        adminId: req.user.id,
+        targetUserIds: userIds,
+        count: userIds.length
+      });
+
+      const result = await client.query(
+        'DELETE FROM users WHERE id = ANY($1::int[])',
+        [userIds]
+      );
+      await client.query('COMMIT');
+
+      // Audit log after commit — rowCount may differ from userIds.length if some
+      // IDs did not exist; recording both values helps detect discrepancies.
+      logger.info('Admin bulk-delete completed', {
+        adminId: req.user.id,
+        requestedCount: userIds.length,
+        deletedCount: result.rowCount
+      });
+
+      res.json({
+        success: true,
+        message: `Deleted ${result.rowCount} users`
+      });
+    } catch (dbError) {
+      await client.query('ROLLBACK');
+      throw dbError;
+    } finally {
+      client.release();
+    }
+  } catch (error) {
+    next(error);
+-- Migration: add btree index on users.created_at
+--
+-- Required by:
+--   • GET /admin/users/export  — ORDER BY created_at DESC (stable pagination)
+--   • GET /admin/users/search  — ORDER BY created_at DESC
+--   • POST /admin/reports/query (recent_signups) — WHERE created_at >= NOW() - INTERVAL '7 days' ORDER BY created_at DESC
+--   • GET /admin/stats         — (future range filters)
+--
+-- Without this index every query above performs a sequential scan + filesort,
+-- which becomes O(n) expensive as the users table grows.
+--
+-- CONCURRENTLY avoids a full table lock on the production users table;
+-- it is safe to run while the application is live.
+-- NOTE: CONCURRENTLY cannot run inside an explicit transaction block —
+-- remove it if your migration runner wraps statements in BEGIN/COMMIT.
+
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_users_created_at
+    ON users USING btree (created_at DESC);
+  }
+});
+
+/**
+ * Admin route: export user data as JSON.
+ * Returns safe fields only — password hashes are never exposed.
+ *
+ * Accepts optional query params: page (0-based), limit (max 1000).
+ * Unbounded exports on large tables will exhaust Node.js heap; always paginate.
+ */
+router.get('/users/export', auth, requireAdmin, async (req, res, next) => {
+  try {
+    const page = Math.max(0, parseInt(req.query.page, 10) || 0);
+    // Cap at 1000 rows per page to prevent heap exhaustion on large tables
+    const limit = Math.min(1000, Math.max(1, parseInt(req.query.limit, 10) || 100));
+    const offset = page * limit;
+
+    // Single query: window function returns total alongside each data row,
+    // eliminating the separate COUNT(*) full-table scan.
+    // Explicit column allowlist — never expose password hashes
+    // ORDER BY ensures stable pagination across requests
+    const result = await pool.query(
+      `SELECT id, email, username, role, is_email_verified, created_at, updated_at,
+              COUNT(*) OVER () AS total
+       FROM users
+       ORDER BY created_at DESC
+       LIMIT $1 OFFSET $2`,
+      [limit, offset]
+    );
+
+    const total = result.rows.length > 0 ? parseInt(result.rows[0].total, 10) : 0;
+
+    res.setHeader('Content-Type', 'application/json');
+    res.json({
+      success: true,
+      data: result.rows.map(({ total: _total, ...row }) => row),
+      pagination: { page, limit, offset, total, pages: Math.ceil(total / limit) }
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * Admin route: run a named, pre-approved report query.
+ *
+ * Accepts { reportName: string } in the request body.
+ * Only report names present in ALLOWED_REPORTS are executed;
+ * no user-supplied SQL ever reaches pool.query().
+ */
+
+// Allowlist of safe, read-only report queries.
+// To add a new report, define it here — never accept SQL from the client.
+const ALLOWED_REPORTS = {
+  users_summary: {
+    description: 'Count of total, verified, and unverified users',
+    sql: `SELECT
+            COUNT(*)                                          AS total_users,
+            COUNT(*) FILTER (WHERE is_email_verified = true) AS verified_users,
+            COUNT(*) FILTER (WHERE is_email_verified = false) AS unverified_users
+          FROM users`,
+  },
+  recent_signups: {
+    description: 'Users created in the last 7 days (safe columns only)',
+    sql: `SELECT id, email, username, role, is_email_verified, created_at
+          FROM users
+          WHERE created_at >= NOW() - INTERVAL '7 days'
+          ORDER BY created_at DESC`,
+  },
+  active_sessions: {
+    description: 'Count of non-revoked refresh tokens',
+    sql: `SELECT COUNT(*) AS active_sessions
+          FROM refresh_tokens
+          WHERE revoked_at IS NULL`,
+  },
+};
+
+router.post('/reports/query', auth, requireAdmin, async (req, res, next) => {
+  try {
+    const { reportName } = req.body;
+
+    if (!reportName || !Object.prototype.hasOwnProperty.call(ALLOWED_REPORTS, reportName)) {
+      return res.status(400).json({
+        success: false,
+        message: `Invalid reportName. Allowed values: ${Object.keys(ALLOWED_REPORTS).join(', ')}`,
+      });
+    }
+
+    const report = ALLOWED_REPORTS[reportName];
+    logger.info('Running admin report', { reportName, description: report.description });
+
+    const result = await pool.query(report.sql);
+    res.json({ success: true, data: result.rows });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * Admin route: update user role.
+ */
+router.put('/users/:id/role', auth, requireAdmin, async (req, res, next) => {
+  try {
+    const { role } = req.body;
+    const userId = req.params.id;
+
+    // Prevent an admin from escalating their own role via this endpoint
+    if (String(userId) === String(req.user.id)) {
+      return res.status(403).json({
+        success: false,
+        message: 'Forbidden: cannot modify your own role'
+      });
+    }
+
+    // Allowlist of valid roles — prevents privilege escalation via arbitrary role values
+    const VALID_ROLES = ['user', 'admin', 'moderator'];
+    if (!role || !VALID_ROLES.includes(role)) {
+      return res.status(400).json({
+        success: false,
+        message: `Invalid role. Must be one of: ${VALID_ROLES.join(', ')}`
+      });
+    }
+
+    const result = await pool.query(
+      'UPDATE users SET role = $1, updated_at = NOW() WHERE id = $2 RETURNING id, email, username, role, is_email_verified, created_at, updated_at',
+      [role, userId]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ success: false, message: 'User not found' });
+    }
+
+    // Return only safe fields — never expose password hash or other sensitive columns
+    const { password, ...safeUser } = result.rows[0];
+
+    res.json({
+      success: true,
+      message: `Updated user ${userId} role to ${role}`,
+      data: { user: safeUser }
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * Admin route: get system stats.
+ */
+router.get('/stats', auth, requireAdmin, async (req, res, next) => {
+  try {
+    // Single query replaces two sequential full-table scans on `users`.
+    // Uses conditional aggregation (same pattern as ALLOWED_REPORTS.users_summary above)
+    // so the planner touches the table once instead of twice.
+    // The refresh_tokens query runs in parallel via Promise.all to eliminate additive latency.
+    const [userStats, tokens] = await Promise.all([
+      pool.query(`
+        SELECT
+          COUNT(*)                                           AS total_users,
+          COUNT(*) FILTER (WHERE is_email_verified = true)  AS verified_users
+        FROM users
+      `),
+      pool.query('SELECT COUNT(*) FROM refresh_tokens WHERE revoked_at IS NULL'),
+    ]);
+
+    res.json({
+      success: true,
+      data: {
+        totalUsers: parseInt(userStats.rows[0].total_users, 10),
+        verifiedUsers: parseInt(userStats.rows[0].verified_users, 10),
+        activeSessions: parseInt(tokens.rows[0].count),
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+module.exports = router;
