@@ -30,11 +30,6 @@ router.get('/users/search', auth, requireAdmin, async (req, res, next) => {
     const offset = page * limit;
 
     // Parameterized query prevents SQL injection
-    const page = parseInt(req.query.page, 10) || 0;
-    const limit = parseInt(req.query.limit, 10) || 50;
-    const offset = page * limit;
-
-    // Parameterized query prevents SQL injection
     const countResult = await pool.query(
       `SELECT COUNT(*) AS total
        FROM users
@@ -60,11 +55,10 @@ router.get('/users/search', auth, requireAdmin, async (req, res, next) => {
     next(error);
   }
 });
-  } catch (error) {
-    next(error);
-  }
-});
 
+/**
+ * Admin route: bulk delete users by IDs.
+ */
 /**
  * Admin route: bulk delete users by IDs.
  */
