@@ -99,16 +99,36 @@ router.post('/users/bulk-delete', auth, requireAdmin, async (req, res, next) => 
 /**
  * Admin route: export user data as JSON.
  * Returns safe fields only — password hashes are never exposed.
+ *
+ * Accepts optional query params: page (0-based), limit (max 1000).
+ * Unbounded exports on large tables will exhaust Node.js heap; always paginate.
  */
 router.get('/users/export', auth, requireAdmin, async (req, res, next) => {
   try {
+    const page = Math.max(0, parseInt(req.query.page, 10) || 0);
+    // Cap at 1000 rows per page to prevent heap exhaustion on large tables
+    const limit = Math.min(1000, Math.max(1, parseInt(req.query.limit, 10) || 100));
+    const offset = page * limit;
+
+    const countResult = await pool.query('SELECT COUNT(*) AS total FROM users');
+    const total = parseInt(countResult.rows[0].total, 10);
+
     // Explicit column allowlist — never expose password hashes
+    // ORDER BY ensures stable pagination across requests
     const result = await pool.query(
-      'SELECT id, email, username, role, is_email_verified, created_at, updated_at FROM users'
+      `SELECT id, email, username, role, is_email_verified, created_at, updated_at
+       FROM users
+       ORDER BY created_at DESC
+       LIMIT $1 OFFSET $2`,
+      [limit, offset]
     );
 
     res.setHeader('Content-Type', 'application/json');
-    res.json({ success: true, data: result.rows });
+    res.json({
+      success: true,
+      data: result.rows,
+      pagination: { page, limit, offset, total, pages: Math.ceil(total / limit) }
+    });
   } catch (error) {
     next(error);
   }
