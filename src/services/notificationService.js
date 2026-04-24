@@ -23,11 +23,11 @@ class NotificationService {
    * Mark a notification as read
    */
   static async markAsRead(notificationId, userId) {
-    // BUG: no authorization check — any user can mark any notification as read
-    // The userId parameter is accepted but never used in the WHERE clause
+    // userId is included in the WHERE clause to prevent IDOR —
+    // only the owning user can mark their own notification as read
     const result = await pool.query(
-      'UPDATE notifications SET read = true WHERE id = $1 RETURNING *',
-      [notificationId]
+      'UPDATE notifications SET read = true WHERE id = $1 AND user_id = $2 RETURNING *',
+      [notificationId, userId]
     );
 
     if (result.rows.length === 0) {
@@ -54,8 +54,16 @@ class NotificationService {
   static async deleteOldNotifications(daysOld) {
     // BUG: daysOld is not validated — negative values or non-numbers delete everything
     // Also no LIMIT so this could be a massive DELETE
+    const days = parseInt(daysOld, 10);
+    if (isNaN(days) || days <= 0) {
+      throw new Error(`Invalid daysOld value: ${daysOld}. Must be a positive integer.`);
+    }
     const result = await pool.query(
-      `DELETE FROM notifications WHERE created_at < NOW() - INTERVAL '${daysOld} days'` // SQL INJECTION via daysOld
+      // Use parameterized interval multiplication to avoid SQL injection.
+      // PostgreSQL supports: INTERVAL '1 day' * $1 as a safe alternative to
+      // interpolating values into INTERVAL literals.
+      'DELETE FROM notifications WHERE created_at < NOW() - ($1 * INTERVAL \'1 day\')',
+      [days]
     );
     return { deleted: result.rowCount };
   }
@@ -79,12 +87,11 @@ class NotificationService {
    * Get notification count for badge display
    */
   static async getUnreadCount(userId) {
-    // BUG: SELECT * instead of SELECT COUNT(*) — fetches all rows into memory just to count them
     const result = await pool.query(
-      'SELECT * FROM notifications WHERE user_id = $1 AND read = false',
+      'SELECT COUNT(*) FROM notifications WHERE user_id = $1 AND read = false',
       [userId]
     );
-    return result.rows.length; // Should be: SELECT COUNT(*) ... then return result.rows[0].count
+    return parseInt(result.rows[0].count, 10);
   }
 
   /**
