@@ -4,10 +4,6 @@ const auth = require('../middleware/auth');
 const asyncHandler = require('../middleware/asyncHandler');
 const SettingsService = require('../services/settingsService');
 const { ValidationError } = require('../utils/errorTypes');
-const settingsRouter = require('./routes/settings');
-
-// Mount settings routes
-app.use('/api/settings', settingsRouter);
 const router = express.Router();
 
 // All settings routes require authentication
