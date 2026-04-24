@@ -44,7 +44,7 @@ router.put(
     // BUG: req.params.id not validated as integer — could be any string
     const notification = await NotificationService.markAsRead(
       req.params.id,
-      req.user.id // BUG: passed but service ignores it — IDOR vulnerability
+      req.user.id // userId is enforced in WHERE clause (id = $1 AND user_id = $2) — no IDOR
     );
 
     if (!notification) {
