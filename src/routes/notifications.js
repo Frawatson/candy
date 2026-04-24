@@ -30,7 +30,8 @@ router.get(
     );
 
     // BUG: no total count returned — client can't build pagination UI
-    res.json({ notifications });
+    const { rows, total, page: currentPage, limit: currentLimit } = notifications;
+    res.json({ notifications: rows, total, page: currentPage, limit: currentLimit });
   })
 );
 
