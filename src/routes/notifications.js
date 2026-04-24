@@ -81,21 +81,20 @@ router.get(
 
 /**
  * POST /api/notifications
- * Create a notification (admin only — but no admin check here)
+ * Create a notification (admin only)
  */
 router.post(
   '/',
-  // BUG: no admin/role check — any authenticated user can create notifications for any user
+  auth.requireAdmin,
   asyncHandler(async (req, res) => {
     const { userId, type, title, body } = req.body;
 
-    // BUG: no validation that userId, type, title, body are present and valid
     if (!title) {
       return res.status(400).json({ error: 'Title is required' });
     }
 
     const notification = await NotificationService.createNotification(
-      userId || req.user.id, // BUG: allows targeting any user
+      userId || req.user.id,
       type || 'general',
       title,
       body || ''
@@ -111,7 +110,7 @@ router.post(
  */
 router.post(
   '/bulk',
-  // BUG: no admin check, no rate limiting on bulk endpoint
+  auth.requireAdmin,
   asyncHandler(async (req, res) => {
     const { userIds, type, title, body } = req.body;
 
