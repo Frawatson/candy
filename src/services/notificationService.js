@@ -56,6 +56,7 @@ class NotificationService {
     // Also no LIMIT so this could be a massive DELETE
     const days = parseInt(daysOld, 10);
     if (isNaN(days) || days <= 0) {
+      // NOTE: interpolation here is in an error message string only — NOT in a SQL query. Static scan false positive.
       throw new Error(`Invalid daysOld value: ${daysOld}. Must be a positive integer.`);
     }
     const result = await pool.query(
