@@ -1,7 +1,7 @@
 -- Notifications table
 CREATE TABLE IF NOT EXISTS notifications (
     id SERIAL PRIMARY KEY,
-    user_id INTEGER REFERENCES users(id),
+    user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
     type VARCHAR(50) NOT NULL DEFAULT 'general',
     title VARCHAR(500) NOT NULL,
     body TEXT,
