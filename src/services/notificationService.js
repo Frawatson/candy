@@ -40,12 +40,37 @@ class NotificationService {
    * Mark all notifications as read for a user
    */
   static async markAllAsRead(userId) {
-    // BUG: no LIMIT — on a user with 100k notifications this updates all rows in one transaction
-    const result = await pool.query(
-      'UPDATE notifications SET read = true WHERE user_id = $1 AND read = false',
-      [userId]
-    );
-    return { updated: result.rowCount };
+    // Process in batches to avoid long-held row-level locks on large notification sets.
+    // Each iteration updates at most BATCH_SIZE rows in its own short transaction,
+    // preventing lock wait timeouts for concurrent readers/writers on the notifications table.
+    const BATCH_SIZE = 1000;
+    let totalUpdated = 0;
+
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
+      // Use a CTE with ctid to atomically select and update the next batch.
+      // ctid is PostgreSQL's physical row address — selecting it in the CTE
+      // avoids a second full-table scan and keeps the batch self-consistent.
+      const result = await pool.query(
+        `UPDATE notifications
+         SET read = true
+         WHERE ctid IN (
+           SELECT ctid FROM notifications
+           WHERE user_id = $1 AND read = false
+           LIMIT $2
+         )`,
+        [userId, BATCH_SIZE]
+      );
+
+      totalUpdated += result.rowCount;
+
+      // If fewer rows than the batch size were updated, we've reached the end.
+      if (result.rowCount < BATCH_SIZE) {
+        break;
+      }
+    }
+
+    return { updated: totalUpdated };
   }
 
   /**
