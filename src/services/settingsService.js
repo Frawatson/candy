@@ -101,7 +101,15 @@ class SettingsService {
       );
 
       logger.info('User settings updated', { userId, fields: Object.keys(updates) });
-      return result.rows[0];
+      const row = result.rows[0];
+      return {
+        displayName: row.display_name,
+        timezone: row.timezone,
+        locale: row.locale,
+        theme: row.theme,
+        emailNotifications: row.email_notifications,
+        pushNotifications: row.push_notifications,
+      };
     } catch (error) {
       logger.error('Failed to update user settings', {
         userId,

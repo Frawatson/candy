@@ -14,7 +14,7 @@ router.use(auth);
 const updateSettingsSchema = Joi.object({
   displayName: Joi.string().trim().min(1).max(100).optional(),
   timezone: Joi.string()
-    .pattern(/^[A-Za-z_/]+$/)
+    .pattern(/^[A-Za-z0-9_/+\-]+$/)
     .max(50)
     .optional()
     .messages({ 'string.pattern.base': 'Invalid timezone format' }),
@@ -70,8 +70,9 @@ router.put(
 router.delete(
   '/',
   asyncHandler(async (req, res) => {
-    const result = await SettingsService.resetSettings(req.user.id);
-    res.json(result);
+    await SettingsService.resetSettings(req.user.id);
+    const settings = await SettingsService.getSettings(req.user.id);
+    res.json({ message: 'Settings reset to defaults', settings });
   })
 );
 
