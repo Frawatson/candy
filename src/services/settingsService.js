@@ -81,6 +81,7 @@ class SettingsService {
           throw new ValidationError(`Unknown setting: ${key}`);
         }
         setClauses.push(`${column} = $${paramIndex}`);
+        columns.push(column);
         values.push(updates[key]);
         paramIndex++;
       }
@@ -92,8 +93,8 @@ class SettingsService {
 
     try {
       const result = await pool.query(
-        `INSERT INTO user_settings (user_id, ${setClauses.map(c => c.split(' = ')[0]).join(', ')})
-         VALUES ($1, ${setClauses.map((_, i) => `$${i + 2}`).join(', ')})
+        `INSERT INTO user_settings (user_id, ${columns.join(', ')})
+         VALUES ($1, ${columns.map((_, i) => `$${i + 2}`).join(', ')})
          ON CONFLICT (user_id)
          DO UPDATE SET ${setClauses.join(', ')}, updated_at = NOW()
          RETURNING *`,
