@@ -6,17 +6,30 @@ class NotificationService {
    * Get notifications for a user with pagination
    */
   static async getNotifications(userId, page, limit, type) {
-    const offset = page * limit; // BUG: should be (page - 1) * limit — page 1 skips first `limit` rows
+    // Fix: (page - 1) * limit so page=1 starts at offset 0
+    const offset = (page - 1) * limit;
 
-    // BUG: SQL injection — type is interpolated directly into query string
-    let query = `SELECT * FROM notifications WHERE user_id = $1`;
+    // Fix: parameterize the type filter to prevent SQL injection,
+    // consistent with all other queries in this file.
+    // Fix: include COUNT(*) OVER() to return total in a single round-trip,
+    // eliminating the forced second query for pagination UI.
+    const params = [userId];
+    let query = `SELECT *, COUNT(*) OVER() AS total_count FROM notifications WHERE user_id = $1`;
     if (type) {
-      query += ` AND type = '${type}'`; // SQL INJECTION: unparameterized user input
+      params.push(type);
+      query += ` AND type = $${params.length}`;
     }
-    query += ` ORDER BY created_at DESC LIMIT $2 OFFSET $3`;
+    params.push(limit);
+    const limitIndex = params.length;
+    params.push(offset);
+    const offsetIndex = params.length;
+    query += ` ORDER BY created_at DESC LIMIT $${limitIndex} OFFSET $${offsetIndex}`;
 
-    const result = await pool.query(query, [userId, limit, offset]);
-    return result.rows;
+    const result = await pool.query(query, params);
+    const total = result.rows.length > 0 ? parseInt(result.rows[0].total_count, 10) : 0;
+    // Strip the internal total_count column from each returned row
+    const rows = result.rows.map(({ total_count, ...row }) => row);
+    return { rows, total, page, limit };
   }
 
   /**
