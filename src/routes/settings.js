@@ -69,8 +69,10 @@ router.put(
 router.delete(
   '/',
   asyncHandler(async (req, res) => {
+    // resetSettings() deletes the row; when no row exists getSettings()
+    // returns a hardcoded default object — no DB read is needed after reset.
     await SettingsService.resetSettings(req.user.id);
-    const settings = await SettingsService.getSettings(req.user.id);
+    const settings = SettingsService.getDefaultSettings();
     res.json({ message: 'Settings reset to defaults', settings });
   })
 );
